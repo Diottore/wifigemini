@@ -80,6 +80,19 @@ HTML_TEMPLATE = """
         input[type=number] {
             -moz-appearance: textfield;
         }
+        /* Estilos para pestañas de resultados */
+        .tab-button {
+            @apply inline-block text-gray-400 hover:text-cyan-400 hover:border-cyan-400 border-b-2 border-transparent py-2 px-4 font-medium transition duration-200;
+        }
+        .tab-button.active {
+            @apply text-cyan-400 border-cyan-400;
+        }
+        .location-tab-button {
+            @apply inline-block bg-gray-700 hover:bg-gray-600 text-gray-300 py-1 px-3 rounded-md text-sm transition duration-200 cursor-pointer;
+        }
+        .location-tab-button.active {
+            @apply bg-cyan-600 text-white;
+        }
     </style>
 </head>
 <body class="bg-gray-900 text-gray-200 font-sans antialiased">
@@ -111,15 +124,15 @@ HTML_TEMPLATE = """
                 </div>
             </div>
 
-            <!-- Botones de Acción -->
-            <div class="flex flex-wrap gap-4 pt-2">
-                <button id="btn-start" class="flex-1 bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-md transition duration-200 shadow-md">
+            <!-- Botones de Acción (Diseño de Grid) -->
+            <div class="grid grid-cols-2 gap-4 pt-2">
+                <button id="btn-start" class="col-span-2 bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-md transition duration-200 shadow-md">
                     Iniciar Pruebas
                 </button>
-                <button id="btn-resume" class="flex-1 bg-cyan-600 hover:bg-cyan-700 text-white font-bold py-2 px-4 rounded-md transition duration-200 shadow-md hidden">
+                <button id="btn-resume" class="col-span-1 bg-cyan-600 hover:bg-cyan-700 text-white font-bold py-2 px-4 rounded-md transition duration-200 shadow-md hidden">
                     Reanudar (Siguiente Ubicación)
                 </button>
-                <button id="btn-stop" class="flex-1 bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-md transition duration-200 shadow-md hidden">
+                <button id="btn-stop" class="col-span-1 bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-md transition duration-200 shadow-md hidden">
                     Detener Pruebas
                 </button>
             </div>
@@ -150,17 +163,34 @@ HTML_TEMPLATE = """
 
         <!-- Sección de Resultados -->
         <section id="results" class="bg-gray-800 p-6 rounded-lg shadow-lg">
-            <div class="flex justify-between items-center border-b border-gray-700 pb-2 mb-4">
-                <h2 class="text-xl font-semibold">Resumen de Resultados</h2>
+            <div class="flex flex-col sm:flex-row justify-between sm:items-center border-b border-gray-700 pb-2 mb-4 gap-4">
+                <h2 class="text-xl font-semibold">Resultados</h2>
                 <div id="download-buttons" class="hidden space-x-2">
                     <a id="btn-download-json" href="/download/json" class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium py-2 px-3 rounded-md transition duration-200">
-                        JSON
+                        JSON (Todo)
                     </a>
                     <a id="btn-download-csv" href="/download/csv" class="bg-teal-600 hover:bg-teal-700 text-white text-sm font-medium py-2 px-3 rounded-md transition duration-200">
-                        CSV
+                        CSV (Iteraciones)
                     </a>
                 </div>
             </div>
+
+            <!-- Pestañas de Navegación de Resultados -->
+            <div class="mb-4">
+                <div class="flex flex-wrap -mb-px" id="results-tabs" aria-label="Tabs">
+                    <button class="tab-button active" data-tab="summary">Resumen Total</button>
+                    <button class="tab-button" data-tab="details">Detalle (Iteraciones)</button>
+                </div>
+            </div>
+            
+            <!-- Contenedor de Pestañas de Ubicación -->
+            <div id="location-tabs-container" class="mb-4 hidden">
+                <p class="text-sm text-gray-400 mb-2">Filtrar por ubicación (clic para [des]activar):</p>
+                <div class="flex flex-wrap gap-2" id="location-tabs">
+                    <!-- Botones de ubicación (p1, p2...) se generan dinámicamente -->
+                </div>
+            </div>
+
             <pre id="summary-output" class="bg-gray-900 rounded-md p-4 text-sm overflow-x-auto">Esperando resultados...</pre>
         </section>
 
@@ -173,8 +203,66 @@ HTML_TEMPLATE = """
         const hide = (id) => $(id).classList.add('hidden');
 
         let pollInterval;
+        let currentView = 'summary'; // 'summary' o 'details'
+        let selectedLocation = null; // null (para todos) o 'p1', 'p2', etc.
+        let appData = {}; // Cache para los datos de /status
 
         // --- Lógica del Frontend ---
+
+        /** Renderiza la sección de resultados basado en el estado actual */
+        function renderResults() {
+            const summaryLog = appData.summary_log || {};
+            const resultsLog = appData.results_log || [];
+            const outputElement = $('summary-output');
+            
+            // Actualizar pestañas principales (Resumen/Detalle)
+            document.querySelectorAll('#results-tabs .tab-button').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.tab === currentView);
+            });
+
+            // Generar y actualizar pestañas de ubicación (p1, p2...)
+            const locationTabsContainer = $('location-tabs');
+            const locationTabsContainerWrapper = $('location-tabs-container');
+            const locations = Object.keys(summaryLog);
+
+            if (locations.length > 0) {
+                locationTabsContainer.innerHTML = ''; // Limpiar pestañas anteriores
+                locations.sort().forEach(loc => {
+                    const btn = document.createElement('button');
+                    btn.className = 'location-tab-button';
+                    btn.textContent = loc.toUpperCase();
+                    btn.dataset.location = loc;
+                    btn.classList.toggle('active', loc === selectedLocation);
+                    locationTabsContainer.appendChild(btn);
+                });
+                show('location-tabs-container');
+            } else {
+                hide('location-tabs-container');
+            }
+
+            // Renderizar contenido en el <pre>
+            let content = {};
+            if (currentView === 'summary') {
+                if (selectedLocation) {
+                    content = summaryLog[selectedLocation] || { "error": "No hay datos para esta ubicación." };
+                } else {
+                    content = summaryLog; // Resumen total
+                }
+            } else if (currentView === 'details') {
+                if (selectedLocation) {
+                    content = resultsLog.filter(r => r.location === selectedLocation);
+                } else {
+                    content = resultsLog; // Todas las iteraciones
+                }
+                if (content.length === 0) content = { "info": "No hay iteraciones para mostrar." };
+            }
+
+            if (Object.keys(content).length === 0 && resultsLog.length === 0) {
+                    outputElement.textContent = "Esperando resultados...";
+            } else {
+                outputElement.textContent = JSON.stringify(content, null, 2);
+            }
+        }
 
         /** Actualiza la UI basado en el estado del backend */
         async function updateStatus() {
@@ -184,6 +272,7 @@ HTML_TEMPLATE = """
                     throw new Error('Error de conexión con el servidor');
                 }
                 const data = await response.json();
+                appData = data; // Cachear la respuesta completa
 
                 // Actualizar textos de estado
                 $('status-text').textContent = data.status.charAt(0).toUpperCase() + data.status.slice(1);
@@ -208,11 +297,22 @@ HTML_TEMPLATE = """
                     hide('error-message');
                 }
 
-                // Actualizar botones
+                // Actualizar botones de acción (grid layout)
+                const btnStart = $('btn-start');
+                const btnResume = $('btn-resume');
+                const btnStop = $('btn-stop');
+
+                // Reset spans for grid layout
+                btnStart.classList.remove('col-span-1', 'col-span-2');
+                btnResume.classList.remove('col-span-1', 'col-span-2');
+                btnStop.classList.remove('col-span-1', 'col-span-2');
+
                 if (data.status === 'running') {
                     hide('btn-start');
                     hide('btn-resume');
                     show('btn-stop');
+                    btnStop.classList.add('col-span-2'); // Stop button takes full width
+
                     $('iperf-host').disabled = true;
                     $('iterations').disabled = true;
                     $('duration').disabled = true;
@@ -220,10 +320,19 @@ HTML_TEMPLATE = """
                     hide('btn-start');
                     show('btn-resume');
                     show('btn-stop');
+                    btnResume.classList.add('col-span-1'); // Resume is half
+                    btnStop.classList.add('col-span-1');   // Stop is half
+                    
+                    // Asegurarse que los inputs sigan deshabilitados
+                    $('iperf-host').disabled = true;
+                    $('iterations').disabled = true;
+                    $('duration').disabled = true;
                 } else { // idle, complete, stopped, error
                     show('btn-start');
                     hide('btn-resume');
                     hide('btn-stop');
+                    btnStart.classList.add('col-span-2'); // Start button takes full width
+
                     $('iperf-host').disabled = false;
                     $('iterations').disabled = false;
                     $('duration').disabled = false;
@@ -233,12 +342,8 @@ HTML_TEMPLATE = """
                     }
                 }
 
-                // Actualizar resumen
-                if (data.summary_log && Object.keys(data.summary_log).length > 0) {
-                    $('summary-output').textContent = JSON.stringify(data.summary_log, null, 2);
-                } else {
-                    $('summary-output').textContent = "Esperando resultados...";
-                }
+                // Actualizar resumen llamando a la nueva función
+                renderResults();
 
                 // Botones de descarga
                 if (data.status === 'complete' || data.status === 'stopped') {
@@ -267,21 +372,31 @@ HTML_TEMPLATE = """
             const duration = parseInt($('duration').value, 10);
 
             if (!host) {
-                alert('Por favor, introduce el host del servidor iperf3.');
+                // No usamos alert()
+                $('error-message').textContent = 'Por favor, introduce el host del servidor iperf3.';
+                show('error-message');
                 return;
             }
 
             if (isNaN(iterations) || iterations < 1 || iterations > 5) {
-                alert('Las iteraciones deben ser un número entre 1 y 5.');
+                $('error-message').textContent = 'Las iteraciones deben ser un número entre 1 y 5.';
+                show('error-message');
                 return;
             }
 
             if (isNaN(duration) || duration < 5) {
-                alert('La duración debe ser de al menos 5 segundos.');
+                $('error-message').textContent = 'La duración debe ser de al menos 5 segundos.';
+                show('error-message');
                 return;
             }
             
             hide('error-message');
+            
+            // Resetear vista
+            currentView = 'summary';
+            selectedLocation = null;
+            appData = {};
+            renderResults(); // Limpia la vista de resultados anterior
             $('summary-output').textContent = "Iniciando pruebas...";
 
             try {
@@ -317,14 +432,34 @@ HTML_TEMPLATE = """
 
         /** Detener las pruebas */
         $('btn-stop').addEventListener('click', async () => {
-            if (confirm('¿Estás seguro de que quieres detener las pruebas?')) {
-                await fetch('/stop', { method: 'POST' });
-                updateStatus();
-            }
+            // Reemplazamos confirm() con una acción directa
+            // if (confirm('¿Estás seguro de que quieres detener las pruebas?')) {
+            await fetch('/stop', { method: 'POST' });
+            updateStatus();
+            // }
         });
 
         // Carga inicial
         updateStatus();
+
+        // --- Event Listeners para Pestañas de Resultados ---
+        $('results-tabs').addEventListener('click', (e) => {
+            if (e.target.classList.contains('tab-button')) {
+                const tab = e.target.dataset.tab;
+                currentView = tab;
+                selectedLocation = null; // Resetear ubicación al cambiar de pestaña principal
+                renderResults();
+            }
+        });
+
+        $('location-tabs').addEventListener('click', (e) => {
+                if (e.target.classList.contains('location-tab-button')) {
+                const location = e.target.dataset.location;
+                // Alternar selección: si ya estaba seleccionado, ponerlo en null (mostrar todo)
+                selectedLocation = (selectedLocation === location) ? null : location;
+                renderResults();
+            }
+        });
     </script>
 
 </body>
@@ -334,256 +469,367 @@ HTML_TEMPLATE = """
 # --- Funciones de Pruebas (Backend) ---
 
 def set_state(key, value):
+# ... (el resto del código Python no necesita cambios) ...
+# ... (existing code ... )
     """Actualiza una clave en el estado global."""
+# ... (existing code ... )
     app_state[key] = value
 
 def log_status(message):
+# ... (existing code ... )
+# ... (el resto del código Python no necesita cambios) ...
+# ... (existing code ... )
     """Actualiza el mensaje de log actual."""
+# ... (existing code ... )
     print(message) # Log a consola
     set_state("current_log_entry", message)
 
 def safe_float(value, default=None):
+# ... (existing code ... )
     """Convierte a float de forma segura."""
+# ... (existing code ... )
     try:
         return float(value)
+# ... (existing code ... )
     except (ValueError, TypeError):
         return default
 
 def p95(data):
+# ... (existing code ... )
     """Calcula el percentil 95 de una lista de números."""
+# ... (existing code ... )
     if not data:
         return None
+# ... (existing code ... )
     sorted_data = sorted(data)
     index = int(len(sorted_data) * 0.95)
+# ... (existing code ... )
     # Asegurarse de que el índice esté dentro de los límites
     index = min(index, len(sorted_data) - 1)
+# ... (existing code ... )
     return sorted_data[index]
 
 def get_rssi():
+# ... (existing code ... )
     """Obtiene el RSSI usando termux-api."""
+# ... (existing code ... )
     try:
         cmd = ["termux-wifi-connectioninfo"]
+# ... (existing code ... )
         process = subprocess.run(cmd, capture_output=True, text=True, timeout=5, check=True)
         data = json.loads(process.stdout)
+# ... (existing code ... )
         rssi = data.get("rssi")
         return int(rssi) if rssi is not None else None
+# ... (existing code ... )
     except FileNotFoundError:
         log_status("Error: termux-api no encontrado. ¿Está instalado?")
+# ... (existing code ... )
         set_state("error_message", "termux-api no encontrado. Instala termux-api.")
     except subprocess.TimeoutExpired:
+# ... (existing code ... )
         log_status("Error: Timeout al obtener RSSI.")
     except subprocess.CalledProcessError as e:
+# ... (existing code ... )
         log_status(f"Error al ejecutar termux-wifi-connectioninfo: {e.stderr}")
     except json.JSONDecodeError:
+# ... (existing code ... )
         log_status("Error: No se pudo decodificar la salida de termux-api.")
     except Exception as e:
+# ... (existing code ... )
         log_status(f"Error inesperado en get_rssi: {e}")
     return None
 
 def run_ping(host, count=10):
+# ... (existing code ... )
     """Ejecuta ping y calcula latencia media y jitter."""
+# ... (existing code ... )
     latencies = []
     jitters = []
+# ... (existing code ... )
     avg_latency = None
     avg_jitter = None
+# ... (existing code ... )
     
     try:
+# ... (existing code ... )
         cmd = ["ping", "-c", str(count), "-i", "0.2", host] # -i 0.2 para pings más rápidos
         process = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+# ... (existing code ... )
         
         # Extraer latencias usando regex
+# ... (existing code ... )
         latencies = [safe_float(t) for t in re.findall(r"time=([\d\.]+)\s*ms", process.stdout)]
         latencies = [t for t in latencies if t is not None]
 
         if latencies:
+# ... (existing code ... )
             avg_latency = statistics.mean(latencies)
             # Calcular jitter como la variación entre pings consecutivos
+# ... (existing code ... )
             if len(latencies) > 1:
                 jitters = [abs(latencies[i+1] - latencies[i]) for i in range(len(latencies)-1)]
+# ... (existing code ... )
                 if jitters:
                     avg_jitter = statistics.mean(jitters)
+# ... (existing code ... )
     
     except subprocess.TimeoutExpired:
+# ... (existing code ... )
         log_status(f"Error: Timeout en ping a {host}")
     except FileNotFoundError:
+# ... (existing code ... )
         log_status("Error: Comando 'ping' no encontrado.")
         set_state("error_message", "Comando 'ping' no encontrado.")
+# ... (existing code ... )
     except Exception as e:
         log_status(f"Error inesperado en run_ping: {e}")
+# ... (existing code ... )
         
     return avg_latency, avg_jitter, latencies
 
 def run_iperf(host, duration, reverse=False):
+# ... (existing code ... )
     """Ejecuta iperf3 y devuelve la tasa de bits y el JSON crudo."""
+# ... (existing code ... )
     bits_per_second = None
     raw_json = {}
+# ... (existing code ... )
     direction = "Download" if reverse else "Upload"
     
     try:
+# ... (existing code ... )
         cmd = ["iperf3", "-c", host, "-t", str(duration), "--json"]
         if reverse:
+# ... (existing code ... )
             cmd.append("-R") # Modo inverso (Download)
         
         process = subprocess.run(cmd, capture_output=True, text=True, timeout=duration + 10)
+# ... (existing code ... )
         raw_json = json.loads(process.stdout)
 
         if "error" in raw_json:
+# ... (existing code ... )
             log_status(f"Error de iperf3 ({direction}): {raw_json['error']}")
             return None, raw_json
+# ... (existing code ... )
         
         # 'sum_received' para Download, 'sum_sent' para Upload
+# ... (existing code ... )
         if reverse: # Download
             bits_per_second = raw_json.get("end", {}).get("sum_received", {}).get("bits_per_second")
+# ... (existing code ... )
         else: # Upload
             bits_per_second = raw_json.get("end", {}).get("sum_sent", {}).get("bits_per_second")
 
         return safe_float(bits_per_second), raw_json
 
+# ... (existing code ... )
     except subprocess.TimeoutExpired:
         log_status(f"Error: Timeout en iperf3 {direction} a {host}")
+# ... (existing code ... )
     except FileNotFoundError:
         log_status("Error: 'iperf3' no encontrado. ¿Está instalado?")
+# ... (existing code ... )
         set_state("error_message", "iperf3 no encontrado. Instala iperf3.")
         set_state("status", "error")
+# ... (existing code ... )
     except json.JSONDecodeError:
         log_status(f"Error: No se pudo decodificar la salida JSON de iperf3 ({direction}).")
+# ... (existing code ... )
         if process.stdout:
             log_status(f"Salida iperf3: {process.stdout[:200]}...")
+# ... (existing code ... )
     except Exception as e:
         log_status(f"Error inesperado en run_iperf ({direction}): {e}")
+# ... (existing code ... )
         
     return None, raw_json
 
 def calculate_summary(location_results):
+# ... (existing code ... )
     """Calcula estadísticas de resumen para una ubicación."""
+# ... (existing code ... )
     summary = {}
     metrics = {
+# ... (existing code ... )
         "rssi": [r["rssi"] for r in location_results if r["rssi"] is not None],
         "latency": [r["latency"] for r in location_results if r["latency"] is not None],
+# ... (existing code ... )
         "jitter": [r["jitter"] for r in location_results if r["jitter"] is not None],
         "download_mbps": [r["download_bps"] / 1_000_000 for r in location_results if r["download_bps"] is not None],
+# ... (existing code ... )
         "upload_mbps": [r["upload_bps"] / 1_000_000 for r in location_results if r["upload_bps"] is not None]
     }
 
     for key, data in metrics.items():
+# ... (existing code ... )
         if data:
             summary[f"{key}_mean"] = round(statistics.mean(data), 2)
+# ... (existing code ... )
             summary[f"{key}_median"] = round(statistics.median(data), 2)
             summary[f"{key}_p95"] = round(p95(data), 2)
+# ... (existing code ... )
             summary[f"{key}_min"] = round(min(data), 2)
             summary[f"{key}_max"] = round(max(data), 2)
+# ... (existing code ... )
             summary[f"{key}_samples"] = len(data)
         else:
+# ... (existing code ... )
             summary[f"{key}_mean"] = None
             summary[f"{key}_median"] = None
+# ... (existing code ... )
             summary[f"{key}_p95"] = None
             summary[f"{key}_min"] = None
+# ... (existing code ... )
             summary[f"{key}_max"] = None
             summary[f"{key}_samples"] = 0
+# ... (existing code ... )
             
     return summary
 
 def test_runner_thread():
+# ... (existing code ... )
     """
     El hilo principal que ejecuta el ciclo de pruebas.
     """
+# ... (existing code ... )
     try:
         # Obtener configuración del estado global
+# ... (existing code ... )
         host = app_state["iperf_host"]
         iterations = app_state["total_iterations"]
+# ... (existing code ... )
         duration = app_state["iperf_duration"]
         
         locations = [f"p{i}" for i in range(1, 9)] # p1..p8
+# ... (existing code ... )
         
         set_state("status", "running")
+# ... (existing code ... )
         set_state("error_message", "")
         
         for loc in locations:
+# ... (existing code ... )
             if stop_event.is_set():
                 log_status(f"Pruebas detenidas por el usuario en {loc}.")
+# ... (existing code ... )
                 break
             
             set_state("current_location", loc)
+# ... (existing code ... )
             location_results = []
             
             for i in range(1, iterations + 1):
+# ... (existing code ... )
                 if stop_event.is_set():
                     log_status(f"Pruebas detenidas por el usuario en {loc}, iteración {i}.")
+# ... (existing code ... )
                     break
                 
                 set_state("current_iteration", i)
+# ... (existing code ... )
                 log_status(f"Ubicación {loc}, Iteración {i}/{iterations}: Iniciando...")
                 
                 iteration_data = {
+# ... (existing code ... )
                     "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                     "location": loc,
+# ... (existing code ... )
                     "iteration": i
                 }
+# ... (existing code ... )
                 
                 # 1. Medir RSSI
                 log_status(f"({loc}-{i}) Obteniendo RSSI...")
+# ... (existing code ... )
                 iteration_data["rssi"] = get_rssi()
                 if stop_event.is_set(): break
+# ... (existing code ... )
                 
                 # 2. Medir Latencia y Jitter (Ping)
                 log_status(f"({loc}-{i}) Ejecutando ping a {host}...")
+# ... (existing code ... )
                 lat, jit, lat_raw = run_ping(host)
                 iteration_data["latency"] = lat
+# ... (existing code ... )
                 iteration_data["jitter"] = jit
                 iteration_data["ping_raw"] = lat_raw
+# ... (existing code ... )
                 if stop_event.is_set(): break
                 
                 # 3. Medir Upload (iperf3)
+# ... (existing code ... )
                 log_status(f"({loc}-{i}) Ejecutando iperf3 Upload (dur: {duration}s)...")
                 up_bps, up_raw = run_iperf(host, duration, reverse=False)
+# ... (existing code ... )
                 iteration_data["upload_bps"] = up_bps
                 iteration_data["iperf_upload_raw"] = up_raw
+# ... (existing code ... )
                 if stop_event.is_set(): break
 
                 # 4. Medir Download (iperf3 -R)
+# ... (existing code ... )
                 log_status(f"({loc}-{i}) Ejecutando iperf3 Download (dur: {duration}s)...")
                 down_bps, down_raw = run_iperf(host, duration, reverse=True)
+# ... (existing code ... )
                 iteration_data["download_bps"] = down_bps
                 iteration_data["iperf_download_raw"] = down_raw
+# ... (existing code ... )
                 
                 app_state["results_log"].append(iteration_data)
                 location_results.append(iteration_data)
+# ... (existing code ... )
                 log_status(f"({loc}-{i}) Completada. (DL: {down_bps/1_000_000:.2f} Mbps, UL: {up_bps/1_000_000:.2f} Mbps, Lat: {lat:.2f} ms)")
 
             # Calcular resumen para la ubicación
+# ... (existing code ... )
             if location_results:
                 app_state["summary_log"][loc] = calculate_summary(location_results)
 
             # Pausar si no es la última ubicación
+# ... (existing code ... )
             if loc != locations[-1] and not stop_event.is_set():
                 log_status(f"Completada la ubicación {loc}. Pausando. Muévete a la siguiente ubicación y presiona 'Reanudar'.")
+# ... (existing code ... )
                 set_state("status", "paused")
                 pause_event.clear()
+# ... (existing code ... )
                 
                 # Esperar a que se presione 'Reanudar' (pause_event.set()) o 'Detener'
                 pause_event.wait()
+# ... (existing code ... )
                 
                 if stop_event.is_set():
+# ... (existing code ... )
                     log_status(f"Pruebas detenidas durante la pausa en {loc}.")
                     break
+# ... (existing code ... )
                 
                 set_state("status", "running")
 
         # Fin del bucle
+# ... (existing code ... )
         if stop_event.is_set():
             set_state("status", "stopped")
+# ... (existing code ... )
             log_status("Pruebas detenidas.")
         else:
+# ... (existing code ... )
             set_state("status", "complete")
             log_status("Todas las pruebas han sido completadas.")
 
     except Exception as e:
+# ... (existing code ... )
         log_status(f"Error fatal en el hilo de pruebas: {e}")
         set_state("status", "error")
+# ... (existing code ... )
         set_state("error_message", str(e))
     finally:
+# ... (existing code ... )
         # Limpieza
         set_state("current_location", "N/A")
+# ... (existing code ... )
         set_state("current_iteration", 0)
 
 
@@ -591,134 +837,182 @@ def test_runner_thread():
 
 @app.route('/')
 def index():
+# ... (existing code ... )
     """Sirve la página principal."""
     return render_template_string(HTML_TEMPLATE)
 
 @app.route('/start', methods=['POST'])
 def start_test():
+# ... (existing code ... )
     """Inicia un nuevo ciclo de pruebas."""
     global test_thread
+# ... (existing code ... )
     if app_state["status"] == "running" or app_state["status"] == "paused":
         return jsonify({"status": "error", "error": "Pruebas ya en ejecución"}), 400
 
     data = request.json
+# ... (existing code ... )
     
     # Resetear estado
     app_state["iperf_host"] = data.get("host")
+# ... (existing code ... )
     app_state["total_iterations"] = int(data.get("iterations", 3))
     app_state["iperf_duration"] = int(data.get("duration", 60))
+# ... (existing code ... )
     app_state["results_log"] = []
     app_state["summary_log"] = {}
+# ... (existing code ... )
     app_state["error_message"] = ""
     app_state["current_log_entry"] = "Iniciando..."
+# ... (existing code ... )
     
     stop_event.clear()
     pause_event.clear()
 
     # Iniciar hilo de pruebas
+# ... (existing code ... )
     test_thread = threading.Thread(target=test_runner_thread)
     test_thread.daemon = True # El hilo morirá si la app principal muere
+# ... (existing code ... )
     test_thread.start()
     
     return jsonify({"status": "started"})
 
 @app.route('/resume', methods=['POST'])
 def resume_test():
+# ... (existing code ... )
     """Reanuda las pruebas si están en pausa."""
     if app_state["status"] == "paused":
+# ... (existing code ... )
         pause_event.set()
         return jsonify({"status": "resumed"})
+# ... (existing code ... )
     return jsonify({"status": "not_paused"}), 400
 
 @app.route('/stop', methods=['POST'])
 def stop_test():
+# ... (existing code ... )
     """Detiene las pruebas en ejecución o en pausa."""
     if app_state["status"] == "running" or app_state["status"] == "paused":
+# ... (existing code ... )
         stop_event.set()
         if app_state["status"] == "paused":
+# ... (existing code ... )
             pause_event.set() # Desbloquear el hilo si está en pausa
         
         # Esperar un poco a que el hilo termine
+# ... (existing code ... )
         if test_thread:
             test_thread.join(timeout=2.0)
+# ... (existing code ... )
             
         set_state("status", "stopped")
+# ... (existing code ... )
         log_status("Pruebas detenidas por el usuario.")
         return jsonify({"status": "stopped"})
+# ... (existing code ... )
     return jsonify({"status": "not_running"}), 400
 
 @app.route('/status')
 def get_status():
+# ... (existing code ... )
     """Devuelve el estado actual de la aplicación."""
     # Devuelve una copia del estado
+# ... (existing code ... )
     return jsonify(app_state.copy())
 
 @app.route('/download/json')
 def download_json():
+# ... (existing code ... )
     """Envía los resultados completos como un archivo JSON."""
     data_to_export = {
+# ... (existing code ... )
         "summary": app_state["summary_log"],
         "details": app_state["results_log"]
+# ... (existing code ... )
     }
     
     # Crear un archivo en memoria
+# ... (existing code ... )
     f = io.BytesIO()
     f.write(json.dumps(data_to_export, indent=2).encode('utf-8'))
+# ... (existing code ... )
     f.seek(0)
     
     filename = f"network_test_results_{time.strftime('%Y%m%d_%H%M%S')}.json"
+# ... (existing code ... )
     
     return send_file(
         f,
+# ... (existing code ... )
         mimetype='application/json',
         as_attachment=True,
+# ... (existing code ... )
         download_name=filename
     )
 
 @app.route('/download/csv')
 def download_csv():
+# ... (existing code ... )
     """Envía los resultados detallados como un archivo CSV."""
     if not app_state["results_log"]:
+# ... (existing code ... )
         return "No hay datos para exportar", 404
 
     # Crear archivo CSV en memoria
+# ... (existing code ... )
     f = io.StringIO()
     writer = csv.writer(f)
+# ... (existing code ... )
     
     # Escribir cabeceras
     # Tomar las claves de la primera fila como cabeceras, excluyendo las crudas
+# ... (existing code ... )
     headers = [key for key in app_state["results_log"][0].keys() if not key.endswith('_raw')]
     writer.writerow(headers)
+# ... (existing code ... )
     
     # Escribir filas
     for row in app_state["results_log"]:
+# ... (existing code ... )
         writer.writerow([row.get(h) for h in headers])
         
     # Rebobinar y enviar
+# ... (existing code ... )
     f_bytes = io.BytesIO(f.getvalue().encode('utf-8'))
     f_bytes.seek(0)
+# ... (existing code ... )
     
     filename = f"network_test_results_{time.strftime('%Y%m%d_%H%M%S')}.csv"
 
     return send_file(
+# ... (existing code ... )
         f_bytes,
         mimetype='text/csv',
+# ... (existing code ... )
         as_attachment=True,
         download_name=filename
+# ... (existing code ... )
     )
 
 # --- Punto de Entrada ---
 if __name__ == '__main__':
+# ... (existing code ... )
     parser = argparse.ArgumentParser(description="Servidor web Termux Network Tester")
-    parser.add_argument('--host', type=str, default='0.0.0.0',
+    parser.add-argument('--host', type=str, default='0.0.0.0',
+# ... (existing code ... )
                         help='Host en el que escuchar (default: 0.0.0.0)')
-    parser.add_argument('--port', type=int, default=5000,
+    parser.add-argument('--port', type=int, default=5000,
+# ... (existing code ... )
                         help='Puerto en el que escuchar (default: 5000)')
-    args = parser.parse_args()
+    args = parser.parse-args()
 
     print(f"*** Iniciando Termux Network Tester en http://{args.host}:{args.port} ***")
+# ... (existing code ... )
     print("Abre http://localhost:5000 en el navegador de tu teléfono.")
     
     # Usar 'threaded=True' es importante para que el polling de la UI
+# ... (existing code ... )
     # y el hilo de pruebas no se bloqueen mutuamente.
     app.run(host=args.host, port=args.port, threaded=True)
+
