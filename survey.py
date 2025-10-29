@@ -1,0 +1,724 @@
+#!/usr/bin/env python
+
+"""
+Termux Network Tester
+---------------------
+Una aplicación web Flask para ejecutar pruebas de red (RSSI, latencia, iperf3)
+en múltiples ubicaciones desde un dispositivo Android con Termux.
+
+Dependencias de Termux:
+  pkg install python iperf3 termux-api
+
+Dependencias de Python:
+  pip install flask
+
+Ejecución:
+  python run_tests.py --host 0.0.0.0 --port 5000
+"""
+
+import os
+import subprocess
+import json
+import threading
+import time
+import argparse
+import statistics
+import re
+import io
+import csv
+from flask import Flask, render_template_string, jsonify, request, send_file
+
+# --- Configuración de la Aplicación Flask ---
+app = Flask(__name__)
+
+# --- Estado Global de la Aplicación ---
+# (Usamos un diccionario para manejar el estado de forma mutable y segura entre hilos)
+app_state = {
+    "status": "idle",  # idle, running, paused, complete, stopped, error
+    "current_location": "N/A",
+    "current_iteration": 0,
+    "total_iterations": 3,
+    "iperf_host": "",
+    "iperf_duration": 60,
+    "results_log": [],      # Log detallado de cada iteración
+    "summary_log": {},      # Resumen por ubicación
+    "current_log_entry": "Esperando para iniciar...",
+    "error_message": ""
+}
+
+# --- Eventos de Sincronización de Hilos ---
+pause_event = threading.Event()
+stop_event = threading.Event()
+test_thread = None
+
+# --- Plantilla HTML (Frontend) ---
+# Se inyecta Tailwind CSS desde CDN.
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Termux Network Tester</title>
+    <!-- Carga de Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Estilos para el log */
+        #log-output {
+            font-family: 'Courier New', Courier, monospace;
+            white-space: pre-wrap;
+            word-break: break-all;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        /* Ocultar flechas en input[type=number] */
+        input::-webkit-outer-spin-button,
+        input::-webkit-inner-spin-button {
+            -webkit-appearance: none;
+            margin: 0;
+        }
+        input[type=number] {
+            -moz-appearance: textfield;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-200 font-sans antialiased">
+
+    <div class="container max-w-4xl mx-auto p-4 md:p-8 space-y-6">
+
+        <header class="text-center">
+            <h1 class="text-3xl font-bold text-cyan-400">Termux Network Tester</h1>
+            <p class="text-lg text-gray-400">Medidor de RSSI, Latencia y Throughput</p>
+        </header>
+
+        <!-- Sección de Controles -->
+        <section id="controls" class="bg-gray-800 p-6 rounded-lg shadow-lg space-y-4">
+            <h2 class="text-xl font-semibold border-b border-gray-700 pb-2">Configuración</h2>
+            
+            <div>
+                <label for="iperf-host" class="block text-sm font-medium text-gray-300 mb-1">Servidor iperf3 (Host/IP)</label>
+                <input type="text" id="iperf-host" class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-cyan-500" placeholder="ej: iperf.example.com">
+            </div>
+
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label for="iterations" class="block text-sm font-medium text-gray-300 mb-1">Iteraciones (1-5)</label>
+                    <input type="number" id="iterations" value="3" min="1" max="5" class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-cyan-500">
+                </div>
+                <div>
+                    <label for="duration" class="block text-sm font-medium text-gray-300 mb-1">Duración iperf3 (s)</label>
+                    <input type="number" id="duration" value="60" min="5" class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-cyan-500">
+                </div>
+            </div>
+
+            <!-- Botones de Acción -->
+            <div class="flex flex-wrap gap-4 pt-2">
+                <button id="btn-start" class="flex-1 bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-md transition duration-200 shadow-md">
+                    Iniciar Pruebas
+                </button>
+                <button id="btn-resume" class="flex-1 bg-cyan-600 hover:bg-cyan-700 text-white font-bold py-2 px-4 rounded-md transition duration-200 shadow-md hidden">
+                    Reanudar (Siguiente Ubicación)
+                </button>
+                <button id="btn-stop" class="flex-1 bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-md transition duration-200 shadow-md hidden">
+                    Detener Pruebas
+                </button>
+            </div>
+        </section>
+
+        <!-- Sección de Estado -->
+        <section id="status" class="bg-gray-800 p-6 rounded-lg shadow-lg">
+            <h2 class="text-xl font-semibold border-b border-gray-700 pb-2 mb-4">Estado Actual</h2>
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 text-center">
+                <div>
+                    <span class="block text-sm text-gray-400">Estado</span>
+                    <span id="status-text" class="text-2xl font-bold text-yellow-400">Idle</span>
+                </div>
+                <div>
+                    <span class="block text-sm text-gray-400">Ubicación</span>
+                    <span id="status-location" class="text-2xl font-bold">N/A</span>
+                </div>
+                <div>
+                    <span class="block text-sm text-gray-400">Iteración</span>
+                    <span id="status-iteration" class="text-2xl font-bold">N/A</span>
+                </div>
+            </div>
+            <div id="status-log" class="mt-4 bg-gray-900 rounded-md p-3 text-sm text-gray-300">
+                <p id="log-entry">Esperando para iniciar...</p>
+            </div>
+            <div id="error-message" class="mt-4 bg-red-900 border border-red-700 text-red-200 p-3 rounded-md hidden"></div>
+        </section>
+
+        <!-- Sección de Resultados -->
+        <section id="results" class="bg-gray-800 p-6 rounded-lg shadow-lg">
+            <div class="flex justify-between items-center border-b border-gray-700 pb-2 mb-4">
+                <h2 class="text-xl font-semibold">Resumen de Resultados</h2>
+                <div id="download-buttons" class="hidden space-x-2">
+                    <a id="btn-download-json" href="/download/json" class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium py-2 px-3 rounded-md transition duration-200">
+                        JSON
+                    </a>
+                    <a id="btn-download-csv" href="/download/csv" class="bg-teal-600 hover:bg-teal-700 text-white text-sm font-medium py-2 px-3 rounded-md transition duration-200">
+                        CSV
+                    </a>
+                </div>
+            </div>
+            <pre id="summary-output" class="bg-gray-900 rounded-md p-4 text-sm overflow-x-auto">Esperando resultados...</pre>
+        </section>
+
+    </div>
+
+    <script>
+        // Funciones auxiliares
+        const $ = (id) => document.getElementById(id);
+        const show = (id) => $(id).classList.remove('hidden');
+        const hide = (id) => $(id).classList.add('hidden');
+
+        let pollInterval;
+
+        // --- Lógica del Frontend ---
+
+        /** Actualiza la UI basado en el estado del backend */
+        async function updateStatus() {
+            try {
+                const response = await fetch('/status');
+                if (!response.ok) {
+                    throw new Error('Error de conexión con el servidor');
+                }
+                const data = await response.json();
+
+                // Actualizar textos de estado
+                $('status-text').textContent = data.status.charAt(0).toUpperCase() + data.status.slice(1);
+                $('status-location').textContent = data.current_location || 'N/A';
+                $('status-iteration').textContent = data.current_iteration ? `${data.current_iteration}/${data.total_iterations}` : 'N/A';
+                $('log-entry').textContent = data.current_log_entry;
+
+                // Actualizar colores de estado
+                const statusText = $('status-text');
+                statusText.classList.remove('text-yellow-400', 'text-green-400', 'text-cyan-400', 'text-red-400');
+                if (data.status === 'running') statusText.classList.add('text-green-400');
+                else if (data.status === 'paused') statusText.classList.add('text-cyan-400');
+                else if (data.status === 'complete') statusText.classList.add('text-green-400');
+                else if (data.status === 'stopped' || data.status === 'error') statusText.classList.add('text-red-400');
+                else statusText.classList.add('text-yellow-400');
+
+                // Mostrar/ocultar mensaje de error
+                if (data.status === 'error' && data.error_message) {
+                    $('error-message').textContent = data.error_message;
+                    show('error-message');
+                } else {
+                    hide('error-message');
+                }
+
+                // Actualizar botones
+                if (data.status === 'running') {
+                    hide('btn-start');
+                    hide('btn-resume');
+                    show('btn-stop');
+                    $('iperf-host').disabled = true;
+                    $('iterations').disabled = true;
+                    $('duration').disabled = true;
+                } else if (data.status === 'paused') {
+                    hide('btn-start');
+                    show('btn-resume');
+                    show('btn-stop');
+                } else { // idle, complete, stopped, error
+                    show('btn-start');
+                    hide('btn-resume');
+                    hide('btn-stop');
+                    $('iperf-host').disabled = false;
+                    $('iterations').disabled = false;
+                    $('duration').disabled = false;
+                    if (pollInterval) {
+                        clearInterval(pollInterval); // Detener polling
+                        pollInterval = null;
+                    }
+                }
+
+                // Actualizar resumen
+                if (data.summary_log && Object.keys(data.summary_log).length > 0) {
+                    $('summary-output').textContent = JSON.stringify(data.summary_log, null, 2);
+                } else {
+                    $('summary-output').textContent = "Esperando resultados...";
+                }
+
+                // Botones de descarga
+                if (data.status === 'complete' || data.status === 'stopped') {
+                    if (data.results_log && data.results_log.length > 0) {
+                        show('download-buttons');
+                    }
+                } else {
+                    hide('download-buttons');
+                }
+
+            } catch (error) {
+                $('status-text').textContent = 'Error';
+                $('status-text').classList.add('text-red-400');
+                $('log-entry').textContent = `Error de conexión: ${error.message}. ¿Está el servidor Python corriendo?`;
+                if (pollInterval) {
+                    clearInterval(pollInterval);
+                    pollInterval = null;
+                }
+            }
+        }
+
+        /** Iniciar las pruebas */
+        $('btn-start').addEventListener('click', async () => {
+            const host = $('iperf-host').value;
+            const iterations = parseInt($('iterations').value, 10);
+            const duration = parseInt($('duration').value, 10);
+
+            if (!host) {
+                alert('Por favor, introduce el host del servidor iperf3.');
+                return;
+            }
+
+            if (isNaN(iterations) || iterations < 1 || iterations > 5) {
+                alert('Las iteraciones deben ser un número entre 1 y 5.');
+                return;
+            }
+
+            if (isNaN(duration) || duration < 5) {
+                alert('La duración debe ser de al menos 5 segundos.');
+                return;
+            }
+            
+            hide('error-message');
+            $('summary-output').textContent = "Iniciando pruebas...";
+
+            try {
+                const response = await fetch('/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ host, iterations, duration })
+                });
+                const data = await response.json();
+                
+                if (data.status === 'started') {
+                    if (!pollInterval) {
+                        pollInterval = setInterval(updateStatus, 1000); // Iniciar polling
+                    }
+                    updateStatus(); // Actualización inmediata
+                } else {
+                    $('log-entry').textContent = `Error al iniciar: ${data.error || 'Error desconocido'}`;
+                    $('status-text').textContent = 'Error';
+                }
+            } catch (error) {
+                 $('log-entry').textContent = `Error al iniciar: ${error.message}`;
+            }
+        });
+
+        /** Reanudar las pruebas */
+        $('btn-resume').addEventListener('click', async () => {
+            await fetch('/resume', { method: 'POST' });
+            if (!pollInterval) {
+                pollInterval = setInterval(updateStatus, 1000); // Reiniciar polling si se detuvo
+            }
+            updateStatus();
+        });
+
+        /** Detener las pruebas */
+        $('btn-stop').addEventListener('click', async () => {
+            if (confirm('¿Estás seguro de que quieres detener las pruebas?')) {
+                await fetch('/stop', { method: 'POST' });
+                updateStatus();
+            }
+        });
+
+        // Carga inicial
+        updateStatus();
+    </script>
+
+</body>
+</html>
+"""
+
+# --- Funciones de Pruebas (Backend) ---
+
+def set_state(key, value):
+    """Actualiza una clave en el estado global."""
+    app_state[key] = value
+
+def log_status(message):
+    """Actualiza el mensaje de log actual."""
+    print(message) # Log a consola
+    set_state("current_log_entry", message)
+
+def safe_float(value, default=None):
+    """Convierte a float de forma segura."""
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return default
+
+def p95(data):
+    """Calcula el percentil 95 de una lista de números."""
+    if not data:
+        return None
+    sorted_data = sorted(data)
+    index = int(len(sorted_data) * 0.95)
+    # Asegurarse de que el índice esté dentro de los límites
+    index = min(index, len(sorted_data) - 1)
+    return sorted_data[index]
+
+def get_rssi():
+    """Obtiene el RSSI usando termux-api."""
+    try:
+        cmd = ["termux-wifi-connectioninfo"]
+        process = subprocess.run(cmd, capture_output=True, text=True, timeout=5, check=True)
+        data = json.loads(process.stdout)
+        rssi = data.get("rssi")
+        return int(rssi) if rssi is not None else None
+    except FileNotFoundError:
+        log_status("Error: termux-api no encontrado. ¿Está instalado?")
+        set_state("error_message", "termux-api no encontrado. Instala termux-api.")
+    except subprocess.TimeoutExpired:
+        log_status("Error: Timeout al obtener RSSI.")
+    except subprocess.CalledProcessError as e:
+        log_status(f"Error al ejecutar termux-wifi-connectioninfo: {e.stderr}")
+    except json.JSONDecodeError:
+        log_status("Error: No se pudo decodificar la salida de termux-api.")
+    except Exception as e:
+        log_status(f"Error inesperado en get_rssi: {e}")
+    return None
+
+def run_ping(host, count=10):
+    """Ejecuta ping y calcula latencia media y jitter."""
+    latencies = []
+    jitters = []
+    avg_latency = None
+    avg_jitter = None
+    
+    try:
+        cmd = ["ping", "-c", str(count), "-i", "0.2", host] # -i 0.2 para pings más rápidos
+        process = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        
+        # Extraer latencias usando regex
+        latencies = [safe_float(t) for t in re.findall(r"time=([\d\.]+)\s*ms", process.stdout)]
+        latencies = [t for t in latencies if t is not None]
+
+        if latencies:
+            avg_latency = statistics.mean(latencies)
+            # Calcular jitter como la variación entre pings consecutivos
+            if len(latencies) > 1:
+                jitters = [abs(latencies[i+1] - latencies[i]) for i in range(len(latencies)-1)]
+                if jitters:
+                    avg_jitter = statistics.mean(jitters)
+    
+    except subprocess.TimeoutExpired:
+        log_status(f"Error: Timeout en ping a {host}")
+    except FileNotFoundError:
+        log_status("Error: Comando 'ping' no encontrado.")
+        set_state("error_message", "Comando 'ping' no encontrado.")
+    except Exception as e:
+        log_status(f"Error inesperado en run_ping: {e}")
+        
+    return avg_latency, avg_jitter, latencies
+
+def run_iperf(host, duration, reverse=False):
+    """Ejecuta iperf3 y devuelve la tasa de bits y el JSON crudo."""
+    bits_per_second = None
+    raw_json = {}
+    direction = "Download" if reverse else "Upload"
+    
+    try:
+        cmd = ["iperf3", "-c", host, "-t", str(duration), "--json"]
+        if reverse:
+            cmd.append("-R") # Modo inverso (Download)
+        
+        process = subprocess.run(cmd, capture_output=True, text=True, timeout=duration + 10)
+        raw_json = json.loads(process.stdout)
+
+        if "error" in raw_json:
+            log_status(f"Error de iperf3 ({direction}): {raw_json['error']}")
+            return None, raw_json
+        
+        # 'sum_received' para Download, 'sum_sent' para Upload
+        if reverse: # Download
+            bits_per_second = raw_json.get("end", {}).get("sum_received", {}).get("bits_per_second")
+        else: # Upload
+            bits_per_second = raw_json.get("end", {}).get("sum_sent", {}).get("bits_per_second")
+
+        return safe_float(bits_per_second), raw_json
+
+    except subprocess.TimeoutExpired:
+        log_status(f"Error: Timeout en iperf3 {direction} a {host}")
+    except FileNotFoundError:
+        log_status("Error: 'iperf3' no encontrado. ¿Está instalado?")
+        set_state("error_message", "iperf3 no encontrado. Instala iperf3.")
+        set_state("status", "error")
+    except json.JSONDecodeError:
+        log_status(f"Error: No se pudo decodificar la salida JSON de iperf3 ({direction}).")
+        if process.stdout:
+            log_status(f"Salida iperf3: {process.stdout[:200]}...")
+    except Exception as e:
+        log_status(f"Error inesperado en run_iperf ({direction}): {e}")
+        
+    return None, raw_json
+
+def calculate_summary(location_results):
+    """Calcula estadísticas de resumen para una ubicación."""
+    summary = {}
+    metrics = {
+        "rssi": [r["rssi"] for r in location_results if r["rssi"] is not None],
+        "latency": [r["latency"] for r in location_results if r["latency"] is not None],
+        "jitter": [r["jitter"] for r in location_results if r["jitter"] is not None],
+        "download_mbps": [r["download_bps"] / 1_000_000 for r in location_results if r["download_bps"] is not None],
+        "upload_mbps": [r["upload_bps"] / 1_000_000 for r in location_results if r["upload_bps"] is not None]
+    }
+
+    for key, data in metrics.items():
+        if data:
+            summary[f"{key}_mean"] = round(statistics.mean(data), 2)
+            summary[f"{key}_median"] = round(statistics.median(data), 2)
+            summary[f"{key}_p95"] = round(p95(data), 2)
+            summary[f"{key}_min"] = round(min(data), 2)
+            summary[f"{key}_max"] = round(max(data), 2)
+            summary[f"{key}_samples"] = len(data)
+        else:
+            summary[f"{key}_mean"] = None
+            summary[f"{key}_median"] = None
+            summary[f"{key}_p95"] = None
+            summary[f"{key}_min"] = None
+            summary[f"{key}_max"] = None
+            summary[f"{key}_samples"] = 0
+            
+    return summary
+
+def test_runner_thread():
+    """
+    El hilo principal que ejecuta el ciclo de pruebas.
+    """
+    try:
+        # Obtener configuración del estado global
+        host = app_state["iperf_host"]
+        iterations = app_state["total_iterations"]
+        duration = app_state["iperf_duration"]
+        
+        locations = [f"p{i}" for i in range(1, 9)] # p1..p8
+        
+        set_state("status", "running")
+        set_state("error_message", "")
+        
+        for loc in locations:
+            if stop_event.is_set():
+                log_status(f"Pruebas detenidas por el usuario en {loc}.")
+                break
+            
+            set_state("current_location", loc)
+            location_results = []
+            
+            for i in range(1, iterations + 1):
+                if stop_event.is_set():
+                    log_status(f"Pruebas detenidas por el usuario en {loc}, iteración {i}.")
+                    break
+                
+                set_state("current_iteration", i)
+                log_status(f"Ubicación {loc}, Iteración {i}/{iterations}: Iniciando...")
+                
+                iteration_data = {
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "location": loc,
+                    "iteration": i
+                }
+                
+                # 1. Medir RSSI
+                log_status(f"({loc}-{i}) Obteniendo RSSI...")
+                iteration_data["rssi"] = get_rssi()
+                if stop_event.is_set(): break
+                
+                # 2. Medir Latencia y Jitter (Ping)
+                log_status(f"({loc}-{i}) Ejecutando ping a {host}...")
+                lat, jit, lat_raw = run_ping(host)
+                iteration_data["latency"] = lat
+                iteration_data["jitter"] = jit
+                iteration_data["ping_raw"] = lat_raw
+                if stop_event.is_set(): break
+                
+                # 3. Medir Upload (iperf3)
+                log_status(f"({loc}-{i}) Ejecutando iperf3 Upload (dur: {duration}s)...")
+                up_bps, up_raw = run_iperf(host, duration, reverse=False)
+                iteration_data["upload_bps"] = up_bps
+                iteration_data["iperf_upload_raw"] = up_raw
+                if stop_event.is_set(): break
+
+                # 4. Medir Download (iperf3 -R)
+                log_status(f"({loc}-{i}) Ejecutando iperf3 Download (dur: {duration}s)...")
+                down_bps, down_raw = run_iperf(host, duration, reverse=True)
+                iteration_data["download_bps"] = down_bps
+                iteration_data["iperf_download_raw"] = down_raw
+                
+                app_state["results_log"].append(iteration_data)
+                location_results.append(iteration_data)
+                log_status(f"({loc}-{i}) Completada. (DL: {down_bps/1_000_000:.2f} Mbps, UL: {up_bps/1_000_000:.2f} Mbps, Lat: {lat:.2f} ms)")
+
+            # Calcular resumen para la ubicación
+            if location_results:
+                app_state["summary_log"][loc] = calculate_summary(location_results)
+
+            # Pausar si no es la última ubicación
+            if loc != locations[-1] and not stop_event.is_set():
+                log_status(f"Completada la ubicación {loc}. Pausando. Muévete a la siguiente ubicación y presiona 'Reanudar'.")
+                set_state("status", "paused")
+                pause_event.clear()
+                
+                # Esperar a que se presione 'Reanudar' (pause_event.set()) o 'Detener'
+                pause_event.wait()
+                
+                if stop_event.is_set():
+                    log_status(f"Pruebas detenidas durante la pausa en {loc}.")
+                    break
+                
+                set_state("status", "running")
+
+        # Fin del bucle
+        if stop_event.is_set():
+            set_state("status", "stopped")
+            log_status("Pruebas detenidas.")
+        else:
+            set_state("status", "complete")
+            log_status("Todas las pruebas han sido completadas.")
+
+    except Exception as e:
+        log_status(f"Error fatal en el hilo de pruebas: {e}")
+        set_state("status", "error")
+        set_state("error_message", str(e))
+    finally:
+        # Limpieza
+        set_state("current_location", "N/A")
+        set_state("current_iteration", 0)
+
+
+# --- Rutas de la API de Flask ---
+
+@app.route('/')
+def index():
+    """Sirve la página principal."""
+    return render_template_string(HTML_TEMPLATE)
+
+@app.route('/start', methods=['POST'])
+def start_test():
+    """Inicia un nuevo ciclo de pruebas."""
+    global test_thread
+    if app_state["status"] == "running" or app_state["status"] == "paused":
+        return jsonify({"status": "error", "error": "Pruebas ya en ejecución"}), 400
+
+    data = request.json
+    
+    # Resetear estado
+    app_state["iperf_host"] = data.get("host")
+    app_state["total_iterations"] = int(data.get("iterations", 3))
+    app_state["iperf_duration"] = int(data.get("duration", 60))
+    app_state["results_log"] = []
+    app_state["summary_log"] = {}
+    app_state["error_message"] = ""
+    app_state["current_log_entry"] = "Iniciando..."
+    
+    stop_event.clear()
+    pause_event.clear()
+
+    # Iniciar hilo de pruebas
+    test_thread = threading.Thread(target=test_runner_thread)
+    test_thread.daemon = True # El hilo morirá si la app principal muere
+    test_thread.start()
+    
+    return jsonify({"status": "started"})
+
+@app.route('/resume', methods=['POST'])
+def resume_test():
+    """Reanuda las pruebas si están en pausa."""
+    if app_state["status"] == "paused":
+        pause_event.set()
+        return jsonify({"status": "resumed"})
+    return jsonify({"status": "not_paused"}), 400
+
+@app.route('/stop', methods=['POST'])
+def stop_test():
+    """Detiene las pruebas en ejecución o en pausa."""
+    if app_state["status"] == "running" or app_state["status"] == "paused":
+        stop_event.set()
+        if app_state["status"] == "paused":
+            pause_event.set() # Desbloquear el hilo si está en pausa
+        
+        # Esperar un poco a que el hilo termine
+        if test_thread:
+            test_thread.join(timeout=2.0)
+            
+        set_state("status", "stopped")
+        log_status("Pruebas detenidas por el usuario.")
+        return jsonify({"status": "stopped"})
+    return jsonify({"status": "not_running"}), 400
+
+@app.route('/status')
+def get_status():
+    """Devuelve el estado actual de la aplicación."""
+    # Devuelve una copia del estado
+    return jsonify(app_state.copy())
+
+@app.route('/download/json')
+def download_json():
+    """Envía los resultados completos como un archivo JSON."""
+    data_to_export = {
+        "summary": app_state["summary_log"],
+        "details": app_state["results_log"]
+    }
+    
+    # Crear un archivo en memoria
+    f = io.BytesIO()
+    f.write(json.dumps(data_to_export, indent=2).encode('utf-8'))
+    f.seek(0)
+    
+    filename = f"network_test_results_{time.strftime('%Y%m%d_%H%M%S')}.json"
+    
+    return send_file(
+        f,
+        mimetype='application/json',
+        as_attachment=True,
+        download_name=filename
+    )
+
+@app.route('/download/csv')
+def download_csv():
+    """Envía los resultados detallados como un archivo CSV."""
+    if not app_state["results_log"]:
+        return "No hay datos para exportar", 404
+
+    # Crear archivo CSV en memoria
+    f = io.StringIO()
+    writer = csv.writer(f)
+    
+    # Escribir cabeceras
+    # Tomar las claves de la primera fila como cabeceras, excluyendo las crudas
+    headers = [key for key in app_state["results_log"][0].keys() if not key.endswith('_raw')]
+    writer.writerow(headers)
+    
+    # Escribir filas
+    for row in app_state["results_log"]:
+        writer.writerow([row.get(h) for h in headers])
+        
+    # Rebobinar y enviar
+    f_bytes = io.BytesIO(f.getvalue().encode('utf-8'))
+    f_bytes.seek(0)
+    
+    filename = f"network_test_results_{time.strftime('%Y%m%d_%H%M%S')}.csv"
+
+    return send_file(
+        f_bytes,
+        mimetype='text/csv',
+        as_attachment=True,
+        download_name=filename
+    )
+
+# --- Punto de Entrada ---
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description="Servidor web Termux Network Tester")
+    parser.add_argument('--host', type=str, default='0.0.0.0',
+                        help='Host en el que escuchar (default: 0.0.0.0)')
+    parser.add_argument('--port', type=int, default=5000,
+                        help='Puerto en el que escuchar (default: 5000)')
+    args = parser.parse_args()
+
+    print(f"*** Iniciando Termux Network Tester en http://{args.host}:{args.port} ***")
+    print("Abre http://localhost:5000 en el navegador de tu teléfono.")
+    
+    # Usar 'threaded=True' es importante para que el polling de la UI
+    # y el hilo de pruebas no se bloqueen mutuamente.
+    app.run(host=args.host, port=args.port, threaded=True)
