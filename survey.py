@@ -996,23 +996,16 @@ def download_csv():
     )
 
 # --- Punto de Entrada ---
+# --- Punto de Entrada ---
 if __name__ == '__main__':
-# ... (existing code ... )
     parser = argparse.ArgumentParser(description="Servidor web Termux Network Tester")
-    parser.add-argument('--host', type=str, default='0.0.0.0',
-# ... (existing code ... )
+    parser.add_argument('--host', type=str, default='0.0.0.0',
                         help='Host en el que escuchar (default: 0.0.0.0)')
-    parser.add-argument('--port', type=int, default=5000,
-# ... (existing code ... )
+    parser.add_argument('--port', type=int, default=5000,
                         help='Puerto en el que escuchar (default: 5000)')
-    args = parser.parse-args()
+    args = parser.parse_args()
 
     print(f"*** Iniciando Termux Network Tester en http://{args.host}:{args.port} ***")
-# ... (existing code ... )
-    print("Abre http://localhost:5000 en el navegador de tu teléfono.")
-    
-    # Usar 'threaded=True' es importante para que el polling de la UI
-# ... (existing code ... )
-    # y el hilo de pruebas no se bloqueen mutuamente.
-    app.run(host=args.host, port=args.port, threaded=True)
+... (existing code ... )
+
 
