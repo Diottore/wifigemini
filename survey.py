@@ -515,16 +515,17 @@ def get_rssi():
         log_status(f"Error inesperado en get_rssi: {e}")
     return None
 
-def run_ping(host, count=10):
-    """Ejecuta ping y calcula latencia media y jitter."""
+def run_ping_baseline(host, duration=8):
+    """Ejecuta ping durante un tiempo determinado (baseline)."""
     latencies = []
     jitters = []
     avg_latency = None
     avg_jitter = None
     
     try:
-        cmd = ["ping", "-c", str(count), "-i", "0.2", host] # -i 0.2 para pings más rápidos
-        process = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        # Usar -w (deadline) para ejecutar por 'duration' segundos
+        cmd = ["ping", "-w", str(duration), "-i", "0.2", host]
+        process = subprocess.run(cmd, capture_output=True, text=True, timeout=duration + 2)
         
         # Extraer latencias usando regex
         latencies = [safe_float(t) for t in re.findall(r"time=([\d\.]+)\s*ms", process.stdout)]
@@ -539,40 +540,63 @@ def run_ping(host, count=10):
                     avg_jitter = statistics.mean(jitters)
     
     except subprocess.TimeoutExpired:
-        log_status(f"Error: Timeout en ping a {host}")
+        log_status(f"Error: Timeout en ping baseline a {host}")
     except FileNotFoundError:
         log_status("Error: Comando 'ping' no encontrado.")
         set_state("error_message", "Comando 'ping' no encontrado.")
     except Exception as e:
-        log_status(f"Error inesperado en run_ping: {e}")
+        log_status(f"Error inesperado en run_ping_baseline: {e}")
         
     return avg_latency, avg_jitter, latencies
 
-def run_iperf(host, duration, reverse=False):
-    """Ejecuta iperf3 y devuelve la tasa de bits y el JSON crudo."""
-    bits_per_second = None
-    raw_json = {}
+def run_ping_and_iperf_concurrently(host, duration, reverse=False):
+    """
+    Ejecuta iperf3 y ping simultáneamente.
+    Devuelve (iperf_bps, iperf_json, ping_lat, ping_jit, ping_raw)
+    """
     direction = "Download" if reverse else "Upload"
+    ping_process = None
     
+    # Resultados de Ping (bajo carga)
+    ping_latencies = []
+    ping_avg_latency = None
+    ping_avg_jitter = None
+    
+    # Resultados de iperf
+    iperf_bits_per_second = None
+    iperf_raw_json = {}
+
     try:
-        cmd = ["iperf3", "-c", host, "-t", str(duration), "--json"]
+        # 1. Iniciar Ping (se ejecuta indefinidamente hasta que se detenga)
+        ping_cmd = ["ping", "-i", "0.2", host]
+        ping_process = subprocess.Popen(ping_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    except FileNotFoundError:
+        log_status("Error: 'ping' no encontrado.")
+        set_state("error_message", "Comando 'ping' no encontrado.")
+        # No se puede continuar esta prueba
+        return None, {}, None, None, []
+    except Exception as e:
+        log_status(f"Error al iniciar ping concurrente: {e}")
+        return None, {}, None, None, []
+
+    try:
+        # 2. Iniciar iperf3 (bloqueante, se ejecuta por 'duration')
+        iperf_cmd = ["iperf3", "-c", host, "-t", str(duration), "--json"]
         if reverse:
-            cmd.append("-R") # Modo inverso (Download)
+            iperf_cmd.append("-R")
         
-        process = subprocess.run(cmd, capture_output=True, text=True, timeout=duration + 10)
-        raw_json = json.loads(process.stdout)
+        # Usamos subprocess.run para iperf, que bloquea hasta que termina
+        iperf_process = subprocess.run(iperf_cmd, capture_output=True, text=True, timeout=duration + 10)
+        iperf_raw_json = json.loads(iperf_process.stdout)
 
-        if "error" in raw_json:
-            log_status(f"Error de iperf3 ({direction}): {raw_json['error']}")
-            return None, raw_json
-        
-        # 'sum_received' para Download, 'sum_sent' para Upload
-        if reverse: # Download
-            bits_per_second = raw_json.get("end", {}).get("sum_received", {}).get("bits_per_second")
-        else: # Upload
-            bits_per_second = raw_json.get("end", {}).get("sum_sent", {}).get("bits_per_second")
-
-        return safe_float(bits_per_second), raw_json
+        if "error" in iperf_raw_json:
+            log_status(f"Error de iperf3 ({direction}): {iperf_raw_json['error']}")
+        else:
+            if reverse: # Download
+                iperf_bits_per_second = iperf_raw_json.get("end", {}).get("sum_received", {}).get("bits_per_second")
+            else: # Upload
+                iperf_bits_per_second = iperf_raw_json.get("end", {}).get("sum_sent", {}).get("bits_per_second")
+            iperf_bits_per_second = safe_float(iperf_bits_per_second)
 
     except subprocess.TimeoutExpired:
         log_status(f"Error: Timeout en iperf3 {direction} a {host}")
@@ -582,22 +606,52 @@ def run_iperf(host, duration, reverse=False):
         set_state("status", "error")
     except json.JSONDecodeError:
         log_status(f"Error: No se pudo decodificar la salida JSON de iperf3 ({direction}).")
-        if process.stdout:
-            log_status(f"Salida iperf3: {process.stdout[:200]}...")
+        if 'iperf_process' in locals() and iperf_process.stdout:
+            log_status(f"Salida iperf3: {iperf_process.stdout[:200]}...")
     except Exception as e:
-        log_status(f"Error inesperado en run_iperf ({direction}): {e}")
-        
-    return None, raw_json
+        log_status(f"Error inesperado en iperf3 ({direction}): {e}")
+    
+    finally:
+        # 3. Detener Ping
+        if ping_process:
+            ping_process.terminate()
+            try:
+                # 4. Leer salida de Ping y parsear
+                stdout, stderr = ping_process.communicate(timeout=2) # Esperar max 2s
+                
+                ping_latencies = [safe_float(t) for t in re.findall(r"time=([\d\.]+)\s*ms", stdout)]
+                ping_latencies = [t for t in ping_latencies if t is not None]
+
+                if ping_latencies:
+                    ping_avg_latency = statistics.mean(ping_latencies)
+                    if len(ping_latencies) > 1:
+                        jitters = [abs(ping_latencies[i+1] - ping_latencies[i]) for i in range(len(ping_latencies)-1)]
+                        if jitters:
+                            ping_avg_jitter = statistics.mean(jitters)
+            except subprocess.TimeoutExpired:
+                log_status("Error: El proceso de Ping no terminó, forzando.")
+                ping_process.kill()
+                ping_process.communicate()
+
+    return iperf_bits_per_second, iperf_raw_json, ping_avg_latency, ping_avg_jitter, ping_latencies
 
 def calculate_summary(location_results):
     """Calcula estadísticas de resumen para una ubicación."""
     summary = {}
     metrics = {
         "rssi": [r["rssi"] for r in location_results if r["rssi"] is not None],
-        "latency": [r["latency"] for r in location_results if r["latency"] is not None],
-        "jitter": [r["jitter"] for r in location_results if r["jitter"] is not None],
-        "download_mbps": [r["download_bps"] / 1_000_000 for r in location_results if r["download_bps"] is not None],
-        "upload_mbps": [r["upload_bps"] / 1_000_000 for r in location_results if r["upload_bps"] is not None]
+        
+        "latency_baseline": [r["latency_baseline"] for r in location_results if r.get("latency_baseline") is not None],
+        "jitter_baseline": [r["jitter_baseline"] for r in location_results if r.get("jitter_baseline") is not None],
+        
+        "latency_upload": [r["latency_upload"] for r in location_results if r.get("latency_upload") is not None],
+        "jitter_upload": [r["jitter_upload"] for r in location_results if r.get("jitter_upload") is not None],
+        
+        "latency_download": [r["latency_download"] for r in location_results if r.get("latency_download") is not None],
+        "jitter_download": [r["jitter_download"] for r in location_results if r.get("jitter_download") is not None],
+        
+        "download_mbps": [r["download_bps"] / 1_000_000 for r in location_results if r.get("download_bps") is not None],
+        "upload_mbps": [r["upload_bps"] / 1_000_000 for r in location_results if r.get("upload_bps") is not None]
     }
 
     for key, data in metrics.items():
@@ -660,30 +714,45 @@ def test_runner_thread():
                 iteration_data["rssi"] = get_rssi()
                 if stop_event.is_set(): break
                 
-                # 2. Medir Latencia y Jitter (Ping)
-                log_status(f"({loc}-{i}) Ejecutando ping a {host}...")
-                lat, jit, lat_raw = run_ping(host)
-                iteration_data["latency"] = lat
-                iteration_data["jitter"] = jit
-                iteration_data["ping_raw"] = lat_raw
+                # 2. Medir Latencia Baseline (8 segundos)
+                log_status(f"({loc}-{i}) Ejecutando ping baseline (8s) a {host}...")
+                lat_base, jit_base, lat_raw_base = run_ping_baseline(host, duration=8)
+                iteration_data["latency_baseline"] = lat_base
+                iteration_data["jitter_baseline"] = jit_base
+                iteration_data["ping_baseline_raw"] = lat_raw_base
                 if stop_event.is_set(): break
                 
-                # 3. Medir Upload (iperf3)
-                log_status(f"({loc}-{i}) Ejecutando iperf3 Upload (dur: {duration}s)...")
-                up_bps, up_raw = run_iperf(host, duration, reverse=False)
+                # 3. Medir Upload + Ping Concurrente
+                log_status(f"({loc}-{i}) Ejecutando iperf3 Upload + Ping (dur: {duration}s)...")
+                up_bps, up_raw, lat_up, jit_up, lat_raw_up = run_ping_and_iperf_concurrently(host, duration, reverse=False)
                 iteration_data["upload_bps"] = up_bps
                 iteration_data["iperf_upload_raw"] = up_raw
+                iteration_data["latency_upload"] = lat_up
+                iteration_data["jitter_upload"] = jit_up
+                iteration_data["ping_upload_raw"] = lat_raw_up
                 if stop_event.is_set(): break
 
-                # 4. Medir Download (iperf3 -R)
-                log_status(f"({loc}-{i}) Ejecutando iperf3 Download (dur: {duration}s)...")
-                down_bps, down_raw = run_iperf(host, duration, reverse=True)
+                # 4. Medir Download + Ping Concurrente
+                log_status(f"({loc}-{i}) Ejecutando iperf3 Download + Ping (dur: {duration}s)...")
+                down_bps, down_raw, lat_down, jit_down, lat_raw_down = run_ping_and_iperf_concurrently(host, duration, reverse=True)
                 iteration_data["download_bps"] = down_bps
                 iteration_data["iperf_download_raw"] = down_raw
+                iteration_data["latency_download"] = lat_down
+                iteration_data["jitter_download"] = jit_down
+                iteration_data["ping_download_raw"] = lat_raw_down
                 
                 app_state["results_log"].append(iteration_data)
                 location_results.append(iteration_data)
-                log_status(f"({loc}-{i}) Completada. (DL: {down_bps/1_000_000:.2f} Mbps, UL: {up_bps/1_000_000:.2f} Mbps, Lat: {lat:.2f} ms)")
+                
+                # Formatear valores para el log, manejando Nones
+                dl_mbps_log = f"{down_bps/1_000_000:.2f}" if down_bps is not None else "N/A"
+                ul_mbps_log = f"{up_bps/1_000_000:.2f}" if up_bps is not None else "N/A"
+                lat_base_log = f"{lat_base:.2f}" if lat_base is not None else "N/A"
+                lat_up_log = f"{lat_up:.2f}" if lat_up is not None else "N/A"
+                lat_down_log = f"{lat_down:.2f}" if lat_down is not None else "N/A"
+
+                log_status(f"({loc}-{i}) Completada. (DL: {dl_mbps_log} Mbps, UL: {ul_mbps_log} Mbps) "
+                           f"(Lat-Base: {lat_base_log} ms, Lat-UL: {lat_up_log} ms, Lat-DL: {lat_down_log} ms)")
 
             # Calcular resumen para la ubicación
             if location_results:
