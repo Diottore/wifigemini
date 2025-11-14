@@ -53,6 +53,8 @@ test_thread = None
 
 # --- Plantilla HTML (Frontend) ---
 # Se inyecta Tailwind CSS desde CDN.
+# CAMBIO 1: Añadir el elemento <audio> al final del <body>
+# CAMBIO 2: Añadir la función playSoundAlert() en <script>
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="es">
@@ -60,7 +62,6 @@ HTML_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Termux Network Tester</title>
-    <!-- Carga de Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         /* Estilos para el log */
@@ -104,7 +105,6 @@ HTML_TEMPLATE = """
             <p class="text-lg text-gray-400">Medidor de RSSI, Latencia y Throughput</p>
         </header>
 
-        <!-- Sección de Controles -->
         <section id="controls" class="bg-gray-800 p-6 rounded-lg shadow-lg space-y-4">
             <h2 class="text-xl font-semibold border-b border-gray-700 pb-2">Configuración</h2>
             
@@ -124,7 +124,6 @@ HTML_TEMPLATE = """
                 </div>
             </div>
 
-            <!-- Botones de Acción (Diseño de Grid) -->
             <div class="grid grid-cols-2 gap-4 pt-2">
                 <button id="btn-start" class="col-span-2 bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-md transition duration-200 shadow-md">
                     Iniciar Pruebas
@@ -138,7 +137,6 @@ HTML_TEMPLATE = """
             </div>
         </section>
 
-        <!-- Sección de Estado -->
         <section id="status" class="bg-gray-800 p-6 rounded-lg shadow-lg">
             <h2 class="text-xl font-semibold border-b border-gray-700 pb-2 mb-4">Estado Actual</h2>
             <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 text-center">
@@ -161,7 +159,6 @@ HTML_TEMPLATE = """
             <div id="error-message" class="mt-4 bg-red-900 border border-red-700 text-red-200 p-3 rounded-md hidden"></div>
         </section>
 
-        <!-- Sección de Resultados -->
         <section id="results" class="bg-gray-800 p-6 rounded-lg shadow-lg">
             <div class="flex flex-col sm:flex-row justify-between sm:items-center border-b border-gray-700 pb-2 mb-4 gap-4">
                 <h2 class="text-xl font-semibold">Resultados</h2>
@@ -175,7 +172,6 @@ HTML_TEMPLATE = """
                 </div>
             </div>
 
-            <!-- Pestañas de Navegación de Resultados -->
             <div class="mb-4">
                 <div class="flex flex-wrap -mb-px" id="results-tabs" aria-label="Tabs">
                     <button class="tab-button active" data-tab="summary">Resumen Total</button>
@@ -183,18 +179,18 @@ HTML_TEMPLATE = """
                 </div>
             </div>
             
-            <!-- Contenedor de Pestañas de Ubicación -->
             <div id="location-tabs-container" class="mb-4 hidden">
                 <p class="text-sm text-gray-400 mb-2">Filtrar por ubicación (clic para [des]activar):</p>
                 <div class="flex flex-wrap gap-2" id="location-tabs">
-                    <!-- Botones de ubicación (p1, p2...) se generan dinámicamente -->
-                </div>
+                    </div>
             </div>
 
             <pre id="summary-output" class="bg-gray-900 rounded-md p-4 text-sm overflow-x-auto">Esperando resultados...</pre>
         </section>
 
     </div>
+
+    <audio id="alert-sound" src="https://www.soundjay.com/buttons/beep-01a.mp3" preload="auto"></audio>
 
     <script>
         // Funciones auxiliares
@@ -206,6 +202,19 @@ HTML_TEMPLATE = """
         let currentView = 'summary'; // 'summary' o 'details'
         let selectedLocation = null; // null (para todos) o 'p1', 'p2', etc.
         let appData = {}; // Cache para los datos de /status
+        let previousStatus = 'idle'; // Para detectar cambios de estado
+
+        // CAMBIO 2: Función para reproducir el sonido de alerta
+        function playSoundAlert() {
+            const audio = $('alert-sound');
+            // Intentar reproducir el sonido. wrap en un try/catch para manejar errores de autoplay en navegadores.
+            try {
+                audio.currentTime = 0; // Reiniciar para reproducir inmediatamente
+                audio.play();
+            } catch (error) {
+                console.error("Error al intentar reproducir el sonido:", error);
+            }
+        }
 
         // --- Lógica del Frontend ---
 
@@ -273,6 +282,12 @@ HTML_TEMPLATE = """
                 }
                 const data = await response.json();
                 appData = data; // Cachear la respuesta completa
+                
+                // CAMBIO 3: Reproducir sonido si el estado ha cambiado a 'paused'
+                if (data.status === 'paused' && previousStatus !== 'paused') {
+                    playSoundAlert();
+                }
+                previousStatus = data.status; // Actualizar el estado previo
 
                 // Actualizar textos de estado
                 $('status-text').textContent = data.status.charAt(0).toUpperCase() + data.status.slice(1);
@@ -396,6 +411,7 @@ HTML_TEMPLATE = """
             currentView = 'summary';
             selectedLocation = null;
             appData = {};
+            previousStatus = 'idle'; // Resetear estado previo
             renderResults(); // Limpia la vista de resultados anterior
             $('summary-output').textContent = "Iniciando pruebas...";
 
@@ -427,7 +443,9 @@ HTML_TEMPLATE = """
             if (!pollInterval) {
                 pollInterval = setInterval(updateStatus, 1000); // Reiniciar polling si se detuvo
             }
-            updateStatus();
+            // Importante: No llamar a updateStatus inmediatamente aquí. Dejar que el polling lo haga
+            // para que el estado 'running' sea reportado por el backend tras salir del pause_event.
+            // updateStatus();
         });
 
         /** Detener las pruebas */
@@ -494,23 +512,6 @@ def p95(data):
     index = min(index, len(sorted_data) - 1)
     return sorted_data[index]
 
-<<<<<<< HEAD
-def play_alert_sound():
-    """Toca un sonido de alerta usando termux-api."""
-    try:
-        # Usar termux-beep para un sonido simple. -f para frecuencia, -l para duración en ms.
-        subprocess.run(["termux-beep", "-f", "880", "-l", "500"], timeout=2, check=True)
-        time.sleep(0.1)
-        subprocess.run(["termux-beep", "-f", "880", "-l", "500"], timeout=2, check=True)
-    except FileNotFoundError:
-        log_status("Alerta: 'termux-beep' no encontrado. No se puede reproducir sonido.")
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
-        log_status(f"Alerta: Error al ejecutar termux-beep: {e}")
-    except Exception as e:
-        log_status(f"Alerta: Error inesperado en play_alert_sound: {e}")
-
-=======
->>>>>>> parent of acc2817 (alerta)
 def get_rssi():
     """Obtiene el RSSI usando termux-api."""
     try:
@@ -539,7 +540,7 @@ def run_ping_baseline(host, duration=8):
     avg_latency = None
     avg_jitter = None
     
-    try {
+    try:
         # Usar -w (deadline) para ejecutar por 'duration' segundos
         cmd = ["ping", "-w", str(duration), "-i", "0.2", host]
         process = subprocess.run(cmd, capture_output=True, text=True, timeout=duration + 2)
@@ -556,12 +557,12 @@ def run_ping_baseline(host, duration=8):
                 if jitters:
                     avg_jitter = statistics.mean(jitters)
     
-    } except subprocess.TimeoutExpired {
+    except subprocess.TimeoutExpired:
         log_status(f"Error: Timeout en ping baseline a {host}")
-    } except FileNotFoundError {
+    except FileNotFoundError:
         log_status("Error: Comando 'ping' no encontrado.")
         set_state("error_message", "Comando 'ping' no encontrado.")
-    } except Exception as e {
+    except Exception as e:
         log_status(f"Error inesperado en run_ping_baseline: {e}")
         
     return avg_latency, avg_jitter, latencies
@@ -608,11 +609,7 @@ def run_ping_and_iperf_concurrently(host, duration, reverse=False):
 
         if "error" in iperf_raw_json:
             log_status(f"Error de iperf3 ({direction}): {iperf_raw_json['error']}")
-<<<<<<< HEAD
-        else {
-=======
         else:
->>>>>>> parent of acc2817 (alerta)
             if reverse: # Download
                 iperf_bits_per_second = iperf_raw_json.get("end", {}).get("sum_received", {}).get("bits_per_second")
             else: # Upload
@@ -629,11 +626,7 @@ def run_ping_and_iperf_concurrently(host, duration, reverse=False):
         log_status(f"Error: No se pudo decodificar la salida JSON de iperf3 ({direction}).")
         if 'iperf_process' in locals() and iperf_process.stdout:
             log_status(f"Salida iperf3: {iperf_process.stdout[:200]}...")
-<<<<<<< HEAD
-    } except Exception as e {
-=======
     except Exception as e:
->>>>>>> parent of acc2817 (alerta)
         log_status(f"Error inesperado en iperf3 ({direction}): {e}")
     
     finally:
@@ -650,14 +643,10 @@ def run_ping_and_iperf_concurrently(host, duration, reverse=False):
                 if ping_latencies:
                     ping_avg_latency = statistics.mean(ping_latencies)
                     if len(ping_latencies) > 1:
-                        jitters = [abs(ping_latencies[i+1] - ping_latencies[i]) for i in range(len(ping_latencies)-1)]
+                        jitters = [abs(ping_latencies[i+1] - latencies[i]) for i in range(len(ping_latencies)-1)]
                         if jitters:
                             ping_avg_jitter = statistics.mean(jitters)
-<<<<<<< HEAD
-            } except subprocess.TimeoutExpired {
-=======
             except subprocess.TimeoutExpired:
->>>>>>> parent of acc2817 (alerta)
                 log_status("Error: El proceso de Ping no terminó, forzando.")
                 ping_process.kill()
                 ping_process.communicate()
@@ -681,7 +670,7 @@ def calculate_summary(location_results):
         
         "download_mbps": [r["download_bps"] / 1_000_000 for r in location_results if r.get("download_bps") is not None],
         "upload_mbps": [r["upload_bps"] / 1_000_000 for r in location_results if r.get("upload_bps") is not None]
-    };
+    }
 
     for key, data in metrics.items():
         if data:
@@ -691,11 +680,7 @@ def calculate_summary(location_results):
             summary[f"{key}_min"] = round(min(data), 2)
             summary[f"{key}_max"] = round(max(data), 2)
             summary[f"{key}_samples"] = len(data)
-<<<<<<< HEAD
-        else {
-=======
         else:
->>>>>>> parent of acc2817 (alerta)
             summary[f"{key}_mean"] = None
             summary[f"{key}_median"] = None
             summary[f"{key}_p95"] = None
@@ -810,11 +795,7 @@ def test_runner_thread():
         if stop_event.is_set():
             set_state("status", "stopped")
             log_status("Pruebas detenidas.")
-<<<<<<< HEAD
-        else {
-=======
         else:
->>>>>>> parent of acc2817 (alerta)
             set_state("status", "complete")
             log_status("Todas las pruebas han sido completadas.")
 
@@ -826,10 +807,6 @@ def test_runner_thread():
         # Limpieza
         set_state("current_location", "N/A")
         set_state("current_iteration", 0)
-<<<<<<< HEAD
-    }
-=======
->>>>>>> parent of acc2817 (alerta)
 
 
 # --- Rutas de la API de Flask ---
@@ -871,7 +848,7 @@ def start_test():
 def resume_test():
     """Reanuda las pruebas si están en pausa."""
     if app_state["status"] == "paused":
-        pause_event.set();
+        pause_event.set()
         return jsonify({"status": "resumed"})
     return jsonify({"status": "not_paused"}), 400
 
@@ -886,11 +863,7 @@ def stop_test():
         # Esperar un poco a que el hilo termine
         if test_thread:
             test_thread.join(timeout=2.0)
-<<<<<<< HEAD
-        
-=======
             
->>>>>>> parent of acc2817 (alerta)
         set_state("status", "stopped")
         log_status("Pruebas detenidas por el usuario.")
         return jsonify({"status": "stopped"})
@@ -947,7 +920,7 @@ def download_csv():
     f_bytes = io.BytesIO(f.getvalue().encode('utf-8'))
     f_bytes.seek(0)
     
-    filename = f"network_test_results_{time.strftime('%Y%m%d_%H%M%S')}.csv";
+    filename = f"network_test_results_{time.strftime('%Y%m%d_%H%M%S')}.csv"
 
     return send_file(
         f_bytes,
@@ -973,4 +946,3 @@ if __name__ == '__main__':
     # Usar 'threaded=True' es importante para que el polling de la UI
     # y el hilo de pruebas no se bloqueen mutuamente.
     app.run(host=args.host, port=args.port, threaded=True)
-
