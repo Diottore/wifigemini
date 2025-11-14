@@ -163,7 +163,7 @@ HTML_TEMPLATE = """
 
         <!-- Sección de Resultados -->
         <section id="results" class="bg-gray-800 p-6 rounded-lg shadow-lg">
-            <div class="flex flex-col sm:flex-row justify-between sm:items-center border-b border-gray-700 pb-2 mb-4 gap-4">
+            <div class="flex flex-col sm:flex-row justify-between sm:items-center border-b border-gray-700 pb-2 mb-4">
                 <h2 class="text-xl font-semibold">Resultados</h2>
                 <div id="download-buttons" class="hidden space-x-2">
                     <a id="btn-download-json" href="/download/json" class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium py-2 px-3 rounded-md transition duration-200">
@@ -495,14 +495,21 @@ def p95(data):
     return sorted_data[index]
 
 def play_alert_sound():
-    """Toca un sonido de alerta usando termux-api."""
+    """Toca un sonido de alerta usando termux-api (beep o notification)."""
     try:
-        # Usar termux-beep para un sonido simple. -f para frecuencia, -l para duración en ms.
+        # Intenta usar termux-beep primero
         subprocess.run(["termux-beep", "-f", "880", "-l", "500"], timeout=2, check=True)
         time.sleep(0.1)
         subprocess.run(["termux-beep", "-f", "880", "-l", "500"], timeout=2, check=True)
     except FileNotFoundError:
-        log_status("Alerta: 'termux-beep' no encontrado. No se puede reproducir sonido.")
+        log_status("Alerta: 'termux-beep' no encontrado. Intentando usar notificación del sistema...")
+        try:
+            # Si beep no está, crea una notificación que debería producir un sonido.
+            subprocess.run(["termux-notification", "--title", "Prueba de Red", "--content", "Ubicación completada. Listo para continuar."], timeout=5, check=True)
+        except FileNotFoundError:
+            log_status("Alerta: 'termux-notification' tampoco encontrado. No se puede emitir alerta sonora.")
+        except Exception as e_notification:
+            log_status(f"Alerta: Error al ejecutar termux-notification: {e_notification}")
     except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
         log_status(f"Alerta: Error al ejecutar termux-beep: {e}")
     except Exception as e:
@@ -580,73 +587,84 @@ def run_ping_and_iperf_concurrently(host, duration, reverse=False):
     iperf_bits_per_second = None
     iperf_raw_json = {}
 
-    try:
+    try {
         # 1. Iniciar Ping (se ejecuta indefinidamente hasta que se detenga)
         ping_cmd = ["ping", "-i", "0.2", host]
         ping_process = subprocess.Popen(ping_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    except FileNotFoundError:
+    } catch FileNotFoundError {
         log_status("Error: 'ping' no encontrado.")
         set_state("error_message", "Comando 'ping' no encontrado.")
         # No se puede continuar esta prueba
         return None, {}, None, None, []
-    except Exception as e:
+    } catch Exception as e {
         log_status(f"Error al iniciar ping concurrente: {e}")
         return None, {}, None, None, []
+    }
 
-    try:
+    try {
         # 2. Iniciar iperf3 (bloqueante, se ejecuta por 'duration')
         iperf_cmd = ["iperf3", "-c", host, "-t", str(duration), "--json"]
-        if reverse:
+        if reverse {
             iperf_cmd.append("-R")
+        }
         
         # Usamos subprocess.run para iperf, que bloquea hasta que termina
         iperf_process = subprocess.run(iperf_cmd, capture_output=True, text=True, timeout=duration + 10)
         iperf_raw_json = json.loads(iperf_process.stdout)
 
-        if "error" in iperf_raw_json:
+        if "error" in iperf_raw_json {
             log_status(f"Error de iperf3 ({direction}): {iperf_raw_json['error']}")
-        else:
-            if reverse: # Download
+        } else {
+            if reverse { # Download
                 iperf_bits_per_second = iperf_raw_json.get("end", {}).get("sum_received", {}).get("bits_per_second")
-            else: # Upload
+            } else { # Upload
                 iperf_bits_per_second = iperf_raw_json.get("end", {}).get("sum_sent", {}).get("bits_per_second")
+            }
             iperf_bits_per_second = safe_float(iperf_bits_per_second)
+        }
 
-    except subprocess.TimeoutExpired:
+    } catch subprocess.TimeoutExpired {
         log_status(f"Error: Timeout en iperf3 {direction} a {host}")
-    except FileNotFoundError:
+    } catch FileNotFoundError {
         log_status("Error: 'iperf3' no encontrado. ¿Está instalado?")
         set_state("error_message", "iperf3 no encontrado. Instala iperf3.")
         set_state("status", "error")
-    except json.JSONDecodeError:
+    } catch json.JSONDecodeError {
         log_status(f"Error: No se pudo decodificar la salida JSON de iperf3 ({direction}).")
-        if 'iperf_process' in locals() and iperf_process.stdout:
+        if 'iperf_process' in locals() and iperf_process.stdout {
             log_status(f"Salida iperf3: {iperf_process.stdout[:200]}...")
-    except Exception as e:
+        }
+    } catch Exception as e {
         log_status(f"Error inesperado en iperf3 ({direction}): {e}")
-    finally:
+    } finally {
         # 3. Detener Ping
-        if ping_process:
+        if ping_process {
             ping_process.terminate()
-            try:
+            try {
                 # 4. Leer salida de Ping y parsear
                 stdout, stderr = ping_process.communicate(timeout=2) # Esperar max 2s
                 
                 ping_latencies = [safe_float(t) for t in re.findall(r"time=([\d\.]+)\s*ms", stdout)]
                 ping_latencies = [t for t in ping_latencies if t is not None]
 
-                if ping_latencies:
+                if ping_latencies {
                     ping_avg_latency = statistics.mean(ping_latencies)
-                    if len(ping_latencies) > 1:
+                    if len(ping_latencies) > 1 {
                         jitters = [abs(ping_latencies[i+1] - ping_latencies[i]) for i in range(len(ping_latencies)-1)]
-                        if jitters:
+                        if jitters {
                             ping_avg_jitter = statistics.mean(jitters)
-            except subprocess.TimeoutExpired:
+                        }
+                    }
+                }
+            } catch subprocess.TimeoutExpired {
                 log_status("Error: El proceso de Ping no terminó, forzando.")
                 ping_process.kill()
                 ping_process.communicate()
+            }
+    }
 
     return iperf_bits_per_second, iperf_raw_json, ping_avg_latency, ping_avg_jitter, ping_latencies
+}
 
 def calculate_summary(location_results):
     """Calcula estadísticas de resumen para una ubicación."""
@@ -665,23 +683,24 @@ def calculate_summary(location_results):
         
         "download_mbps": [r["download_bps"] / 1_000_000 for r in location_results if r.get("download_bps") is not None],
         "upload_mbps": [r["upload_bps"] / 1_000_000 for r in location_results if r.get("upload_bps") is not None]
-    }
+    };
 
-    for key, data in metrics.items():
-        if data:
+    for key, data in metrics.items() {
+        if data {
             summary[f"{key}_mean"] = round(statistics.mean(data), 2)
             summary[f"{key}_median"] = round(statistics.median(data), 2)
             summary[f"{key}_p95"] = round(p95(data), 2)
             summary[f"{key}_min"] = round(min(data), 2)
             summary[f"{key}_max"] = round(max(data), 2)
             summary[f"{key}_samples"] = len(data)
-        else:
+        } else {
             summary[f"{key}_mean"] = None
             summary[f"{key}_median"] = None
             summary[f"{key}_p95"] = None
             summary[f"{key}_min"] = None
             summary[f"{key}_max"] = None
             summary[f"{key}_samples"] = 0
+        }
             
     return summary
 
@@ -689,7 +708,7 @@ def test_runner_thread():
     """
     El hilo principal que ejecuta el ciclo de pruebas.
     """
-    try:
+    try {
         # Obtener configuración del estado global
         host = app_state["iperf_host"]
         iterations = app_state["total_iterations"]
@@ -700,18 +719,20 @@ def test_runner_thread():
         set_state("status", "running")
         set_state("error_message", "")
         
-        for loc in locations:
-            if stop_event.is_set():
+        for loc in locations {
+            if stop_event.is_set() {
                 log_status(f"Pruebas detenidas por el usuario en {loc}.")
                 break
+            }
             
             set_state("current_location", loc)
             location_results = []
             
-            for i in range(1, iterations + 1):
-                if stop_event.is_set():
+            for i in range(1, iterations + 1) {
+                if stop_event.is_set() {
                     log_status(f"Pruebas detenidas por el usuario en {loc}, iteración {i}.")
                     break
+                }
                 
                 set_state("current_iteration", i)
                 log_status(f"Ubicación {loc}, Iteración {i}/{iterations}: Iniciando...")
@@ -725,7 +746,7 @@ def test_runner_thread():
                 # 1. Medir RSSI
                 log_status(f"({loc}-{i}) Obteniendo RSSI...")
                 iteration_data["rssi"] = get_rssi()
-                if stop_event.is_set(): break
+                if stop_event.is_set() break
                 
                 # 2. Medir Latencia Baseline (8 segundos)
                 log_status(f"({loc}-{i}) Ejecutando ping baseline (8s) a {host}...")
@@ -733,7 +754,7 @@ def test_runner_thread():
                 iteration_data["latency_baseline"] = lat_base
                 iteration_data["jitter_baseline"] = jit_base
                 iteration_data["ping_baseline_raw"] = lat_raw_base
-                if stop_event.is_set(): break
+                if stop_event.is_set() break
                 
                 # 3. Medir Upload + Ping Concurrente
                 log_status(f"({loc}-{i}) Ejecutando iperf3 Upload + Ping (dur: {duration}s)...");
@@ -743,7 +764,7 @@ def test_runner_thread():
                 iteration_data["latency_upload"] = lat_up
                 iteration_data["jitter_upload"] = jit_up
                 iteration_data["ping_upload_raw"] = lat_raw_up
-                if stop_event.is_set(): break
+                if stop_event.is_set() break
 
                 # 4. Medir Download + Ping Concurrente
                 log_status(f"({loc}-{i}) Ejecutando iperf3 Download + Ping (dur: {duration}s)...");
@@ -768,42 +789,47 @@ def test_runner_thread():
                            f"(Lat-Base: {lat_base_log} ms, Lat-UL: {lat_up_log} ms, Lat-DL: {lat_down_log} ms)")
 
             # Calcular resumen para la ubicación
-            if location_results:
+            if location_results {
                 app_state["summary_log"][loc] = calculate_summary(location_results)
+            }
 
             # Pausar si no es la última ubicación
-            if loc != locations[-1] and not stop_event.is_set():
+            if loc != locations[-1] && !stop_event.is_set() {
                 log_status(f"Completada la ubicación {loc}. Pausando. Muévete a la siguiente ubicación y presiona 'Reanudar'.")
                 play_alert_sound() # <-- Alerta sonora
                 set_state("status", "paused")
-                pause_event.clear()
+                pause_event.clear();
                 
                 # Esperar a que se presione 'Reanudar' (pause_event.set()) o 'Detener'
-                pause_event.wait()
+                pause_event.wait();
                 
-                if stop_event.is_set():
+                if stop_event.is_set() {
                     log_status(f"Pruebas detenidas durante la pausa en {loc}.")
                     break
+                }
                 
                 set_state("status", "running")
+            }
 
         # Fin del bucle
-        if stop_event.is_set():
+        if stop_event.is_set() {
             set_state("status", "stopped")
             log_status("Pruebas detenidas.")
-        else:
+        } else {
             set_state("status", "complete")
             log_status("Todas las pruebas han sido completadas.")
             play_alert_sound() # <-- Alerta sonora final
+        }
 
-    except Exception as e:
+    } catch Exception as e {
         log_status(f"Error fatal en el hilo de pruebas: {e}")
         set_state("status", "error")
         set_state("error_message", str(e))
-    finally:
+    } finally {
         # Limpieza
         set_state("current_location", "N/A")
         set_state("current_iteration", 0)
+    }
 
 
 # --- Rutas de la API de Flask ---
@@ -845,7 +871,7 @@ def start_test():
 def resume_test():
     """Reanuda las pruebas si están en pausa."""
     if app_state["status"] == "paused":
-        pause_event.set()
+        pause_event.set();
         return jsonify({"status": "resumed"})
     return jsonify({"status": "not_paused"}), 400
 
@@ -858,8 +884,9 @@ def stop_test():
             pause_event.set() # Desbloquear el hilo si está en pausa
         
         # Esperar un poco a que el hilo termine
-        if test_thread:
+        if test_thread {
             test_thread.join(timeout=2.0)
+        }
         
         set_state("status", "stopped")
         log_status("Pruebas detenidas por el usuario.")
