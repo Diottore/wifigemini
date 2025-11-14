@@ -494,6 +494,7 @@ def p95(data):
     index = min(index, len(sorted_data) - 1)
     return sorted_data[index]
 
+<<<<<<< HEAD
 def play_alert_sound():
     """Toca un sonido de alerta usando termux-api."""
     try:
@@ -508,6 +509,8 @@ def play_alert_sound():
     except Exception as e:
         log_status(f"Alerta: Error inesperado en play_alert_sound: {e}")
 
+=======
+>>>>>>> parent of acc2817 (alerta)
 def get_rssi():
     """Obtiene el RSSI usando termux-api."""
     try:
@@ -580,21 +583,20 @@ def run_ping_and_iperf_concurrently(host, duration, reverse=False):
     iperf_bits_per_second = None
     iperf_raw_json = {}
 
-    try {
+    try:
         # 1. Iniciar Ping (se ejecuta indefinidamente hasta que se detenga)
         ping_cmd = ["ping", "-i", "0.2", host]
         ping_process = subprocess.Popen(ping_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    } except FileNotFoundError {
+    except FileNotFoundError:
         log_status("Error: 'ping' no encontrado.")
         set_state("error_message", "Comando 'ping' no encontrado.")
         # No se puede continuar esta prueba
         return None, {}, None, None, []
-    } except Exception as e {
+    except Exception as e:
         log_status(f"Error al iniciar ping concurrente: {e}")
         return None, {}, None, None, []
-    }
 
-    try {
+    try:
         # 2. Iniciar iperf3 (bloqueante, se ejecuta por 'duration')
         iperf_cmd = ["iperf3", "-c", host, "-t", str(duration), "--json"]
         if reverse:
@@ -606,31 +608,39 @@ def run_ping_and_iperf_concurrently(host, duration, reverse=False):
 
         if "error" in iperf_raw_json:
             log_status(f"Error de iperf3 ({direction}): {iperf_raw_json['error']}")
+<<<<<<< HEAD
         else {
+=======
+        else:
+>>>>>>> parent of acc2817 (alerta)
             if reverse: # Download
                 iperf_bits_per_second = iperf_raw_json.get("end", {}).get("sum_received", {}).get("bits_per_second")
             else: # Upload
                 iperf_bits_per_second = iperf_raw_json.get("end", {}).get("sum_sent", {}).get("bits_per_second")
             iperf_bits_per_second = safe_float(iperf_bits_per_second)
-        }
 
-    } except subprocess.TimeoutExpired {
+    except subprocess.TimeoutExpired:
         log_status(f"Error: Timeout en iperf3 {direction} a {host}")
-    } except FileNotFoundError {
+    except FileNotFoundError:
         log_status("Error: 'iperf3' no encontrado. ¿Está instalado?")
         set_state("error_message", "iperf3 no encontrado. Instala iperf3.")
         set_state("status", "error")
-    } except json.JSONDecodeError {
+    except json.JSONDecodeError:
         log_status(f"Error: No se pudo decodificar la salida JSON de iperf3 ({direction}).")
         if 'iperf_process' in locals() and iperf_process.stdout:
             log_status(f"Salida iperf3: {iperf_process.stdout[:200]}...")
+<<<<<<< HEAD
     } except Exception as e {
+=======
+    except Exception as e:
+>>>>>>> parent of acc2817 (alerta)
         log_status(f"Error inesperado en iperf3 ({direction}): {e}")
-    } finally {
+    
+    finally:
         # 3. Detener Ping
         if ping_process:
             ping_process.terminate()
-            try {
+            try:
                 # 4. Leer salida de Ping y parsear
                 stdout, stderr = ping_process.communicate(timeout=2) # Esperar max 2s
                 
@@ -643,7 +653,11 @@ def run_ping_and_iperf_concurrently(host, duration, reverse=False):
                         jitters = [abs(ping_latencies[i+1] - ping_latencies[i]) for i in range(len(ping_latencies)-1)]
                         if jitters:
                             ping_avg_jitter = statistics.mean(jitters)
+<<<<<<< HEAD
             } except subprocess.TimeoutExpired {
+=======
+            except subprocess.TimeoutExpired:
+>>>>>>> parent of acc2817 (alerta)
                 log_status("Error: El proceso de Ping no terminó, forzando.")
                 ping_process.kill()
                 ping_process.communicate()
@@ -677,7 +691,11 @@ def calculate_summary(location_results):
             summary[f"{key}_min"] = round(min(data), 2)
             summary[f"{key}_max"] = round(max(data), 2)
             summary[f"{key}_samples"] = len(data)
+<<<<<<< HEAD
         else {
+=======
+        else:
+>>>>>>> parent of acc2817 (alerta)
             summary[f"{key}_mean"] = None
             summary[f"{key}_median"] = None
             summary[f"{key}_p95"] = None
@@ -691,7 +709,7 @@ def test_runner_thread():
     """
     El hilo principal que ejecuta el ciclo de pruebas.
     """
-    try {
+    try:
         # Obtener configuración del estado global
         host = app_state["iperf_host"]
         iterations = app_state["total_iterations"]
@@ -776,7 +794,6 @@ def test_runner_thread():
             # Pausar si no es la última ubicación
             if loc != locations[-1] and not stop_event.is_set():
                 log_status(f"Completada la ubicación {loc}. Pausando. Muévete a la siguiente ubicación y presiona 'Reanudar'.")
-                play_alert_sound() # <-- Alerta sonora
                 set_state("status", "paused")
                 pause_event.clear()
                 
@@ -793,21 +810,26 @@ def test_runner_thread():
         if stop_event.is_set():
             set_state("status", "stopped")
             log_status("Pruebas detenidas.")
+<<<<<<< HEAD
         else {
+=======
+        else:
+>>>>>>> parent of acc2817 (alerta)
             set_state("status", "complete")
             log_status("Todas las pruebas han sido completadas.")
-            play_alert_sound() # <-- Alerta sonora final
-        }
 
-    } except Exception as e {
+    except Exception as e:
         log_status(f"Error fatal en el hilo de pruebas: {e}")
         set_state("status", "error")
         set_state("error_message", str(e))
-    } finally {
+    finally:
         # Limpieza
         set_state("current_location", "N/A")
         set_state("current_iteration", 0)
+<<<<<<< HEAD
     }
+=======
+>>>>>>> parent of acc2817 (alerta)
 
 
 # --- Rutas de la API de Flask ---
@@ -864,7 +886,11 @@ def stop_test():
         # Esperar un poco a que el hilo termine
         if test_thread:
             test_thread.join(timeout=2.0)
+<<<<<<< HEAD
         
+=======
+            
+>>>>>>> parent of acc2817 (alerta)
         set_state("status", "stopped")
         log_status("Pruebas detenidas por el usuario.")
         return jsonify({"status": "stopped"})
