@@ -53,8 +53,6 @@ test_thread = None
 
 # --- Plantilla HTML (Frontend) ---
 # Se inyecta Tailwind CSS desde CDN.
-# CAMBIO 1: Añadir el elemento <audio> al final del <body>
-# CAMBIO 2: Añadir la función playSoundAlert() en <script>
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="es">
@@ -190,8 +188,6 @@ HTML_TEMPLATE = """
 
     </div>
 
-    <audio id="alert-sound" src="https://www.soundjay.com/buttons/beep-01a.mp3" preload="auto"></audio>
-
     <script>
         // Funciones auxiliares
         const $ = (id) => document.getElementById(id);
@@ -204,17 +200,20 @@ HTML_TEMPLATE = """
         let appData = {}; // Cache para los datos de /status
         let previousStatus = 'idle'; // Para detectar cambios de estado
 
-        // CAMBIO 2: Función para reproducir el sonido de alerta
-        function playSoundAlert() {
-            const audio = $('alert-sound');
-            // Intentar reproducir el sonido. wrap en un try/catch para manejar errores de autoplay en navegadores.
-            try {
-                audio.currentTime = 0; // Reiniciar para reproducir inmediatamente
-                audio.play();
-            } catch (error) {
-                console.error("Error al intentar reproducir el sonido:", error);
-            }
+        // --- NUEVO: Audio de Notificación ---
+        // (Usamos un sonido de notificación simple de un CDN)
+        const notificationSound = new Audio('https://cdn.jsdelivr.net/npm/ion-sound@3.0.7/sounds/bell_ring.mp3');
+        
+        /** Reproduce el sonido de notificación, manejando errores de autoplay */
+        function playNotification() {
+            notificationSound.play().catch(e => {
+                // El navegador puede bloquear la reproducción automática
+                console.warn("No se pudo reproducir el sonido (requiere interacción del usuario):", e.message);
+                // Como alternativa, podríamos mostrar una alerta visual aquí
+            });
         }
+        // --- FIN: Audio de Notificación ---
+
 
         // --- Lógica del Frontend ---
 
@@ -282,12 +281,16 @@ HTML_TEMPLATE = """
                 }
                 const data = await response.json();
                 appData = data; // Cachear la respuesta completa
-                
-                // CAMBIO 3: Reproducir sonido si el estado ha cambiado a 'paused'
-                if (data.status === 'paused' && previousStatus !== 'paused') {
-                    playSoundAlert();
+
+                // --- INICIO: Alerta Sonora ---
+                // Detectar la transición de 'running' a 'paused' o 'complete'
+                const newStatus = data.status;
+                if (previousStatus === 'running' && (newStatus === 'paused' || newStatus === 'complete')) {
+                    playNotification();
                 }
-                previousStatus = data.status; // Actualizar el estado previo
+                previousStatus = newStatus; // Actualizar el estado anterior
+                // --- FIN: Alerta Sonora ---
+
 
                 // Actualizar textos de estado
                 $('status-text').textContent = data.status.charAt(0).toUpperCase() + data.status.slice(1);
@@ -410,8 +413,8 @@ HTML_TEMPLATE = """
             // Resetear vista
             currentView = 'summary';
             selectedLocation = null;
+            previousStatus = 'idle'; // Resetear estado anterior al iniciar
             appData = {};
-            previousStatus = 'idle'; // Resetear estado previo
             renderResults(); // Limpia la vista de resultados anterior
             $('summary-output').textContent = "Iniciando pruebas...";
 
@@ -443,9 +446,7 @@ HTML_TEMPLATE = """
             if (!pollInterval) {
                 pollInterval = setInterval(updateStatus, 1000); // Reiniciar polling si se detuvo
             }
-            // Importante: No llamar a updateStatus inmediatamente aquí. Dejar que el polling lo haga
-            // para que el estado 'running' sea reportado por el backend tras salir del pause_event.
-            // updateStatus();
+            updateStatus();
         });
 
         /** Detener las pruebas */
@@ -643,7 +644,7 @@ def run_ping_and_iperf_concurrently(host, duration, reverse=False):
                 if ping_latencies:
                     ping_avg_latency = statistics.mean(ping_latencies)
                     if len(ping_latencies) > 1:
-                        jitters = [abs(ping_latencies[i+1] - latencies[i]) for i in range(len(ping_latencies)-1)]
+                        jitters = [abs(ping_latencies[i+1] - ping_latencies[i]) for i in range(len(ping_latencies)-1)]
                         if jitters:
                             ping_avg_jitter = statistics.mean(jitters)
             except subprocess.TimeoutExpired:
