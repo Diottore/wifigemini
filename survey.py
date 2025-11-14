@@ -200,16 +200,17 @@ HTML_TEMPLATE = """
         let appData = {}; // Cache para los datos de /status
         let previousStatus = 'idle'; // Para detectar cambios de estado
 
-        // --- NUEVO: Audio de Notificación ---
-        // (Usamos un sonido de notificación simple de un CDN)
-        const notificationSound = new Audio('https://cdn.jsdelivr.net/npm/ion-sound@3.0.7/sounds/bell_ring.mp3');
+        // --- NUEVO: Audio de Notificación (Auto-alojado - Offline) ---
+        // Esta ruta '/sound' es servida por Flask
+        const notificationSound = new Audio('/sound');
         
-        /** Reproduce el sonido de notificación, manejando errores de autoplay */
+        /** Reproduce el sonido de notificación */
         function playNotification() {
+            // .load() asegura que el sonido se reproduzca desde el inicio cada vez
+            notificationSound.load(); 
             notificationSound.play().catch(e => {
                 // El navegador puede bloquear la reproducción automática
                 console.warn("No se pudo reproducir el sonido (requiere interacción del usuario):", e.message);
-                // Como alternativa, podríamos mostrar una alerta visual aquí
             });
         }
         // --- FIN: Audio de Notificación ---
@@ -667,7 +668,7 @@ def calculate_summary(location_results):
         "jitter_upload": [r["jitter_upload"] for r in location_results if r.get("jitter_upload") is not None],
         
         "latency_download": [r["latency_download"] for r in location_results if r.get("latency_download") is not None],
-        "jitter_download": [r["jitter_download"] for r in location_results if r.get("jitter_download") is not None],
+        "jitter_download": [r["jitter_download"]for r in location_results if r.get("jitter_download") is not None],
         
         "download_mbps": [r["download_bps"] / 1_000_000 for r in location_results if r.get("download_bps") is not None],
         "upload_mbps": [r["upload_bps"] / 1_000_000 for r in location_results if r.get("upload_bps") is not None]
@@ -930,15 +931,31 @@ def download_csv():
         download_name=filename
     )
 
+# --- NUEVA RUTA PARA EL SONIDO ---
+@app.route('/sound')
+def get_sound():
+    """Sirve el archivo de sonido local."""
+    sound_file = 'notificacion.mp3' # El nombre del archivo que pusiste en la carpeta
+    try:
+        # Usamos 'pathlib.Path.cwd()' para asegurarnos de que busca en el directorio actual
+        # import pathlib
+        # file_path = pathlib.Path.cwd() / sound_file
+        # return send_file(file_path, mimetype='audio/mpeg')
+        
+        # Versión simple (Python 3.8+):
+        return send_file(sound_file, mimetype='audio/mpeg')
+        
+    except FileNotFoundError:
+        log_status("Error: No se encontró el archivo 'notificacion.mp3'.")
+        return "Archivo de sonido no encontrado", 404
+
 # --- Punto de Entrada ---
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Servidor web Termux Network Tester")
-    # CORRECCIÓN: Usar add_argument (con guion bajo)
     parser.add_argument('--host', type=str, default='0.0.0.0',
                         help='Host en el que escuchar (default: 0.0.0.0)')
     parser.add_argument('--port', type=int, default=5000,
                         help='Puerto en el que escuchar (default: 5000)')
-    # CORRECCIÓN: Usar parse_args (con guion bajo)
     args = parser.parse_args()
 
     print(f"*** Iniciando Termux Network Tester en http://{args.host}:{args.port} ***")
